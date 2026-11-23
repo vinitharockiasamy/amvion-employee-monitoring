@@ -4,7 +4,7 @@ title Employee Monitoring Agent — Installer
 cd /d "%~dp0"
 
 set "INSTALL_DIR=%LOCALAPPDATA%\Amvion\EmployeeMonitoringAgent"
-set "SERVER_URL=https://edmonton-assumption-logging-twelve.trycloudflare.com"
+set "SERVER_URL=https://amvion-employee-monitoring.onrender.com"
 
 if exist "%~dp0server_url.txt" (
     set /p SERVER_URL=<"%~dp0server_url.txt"

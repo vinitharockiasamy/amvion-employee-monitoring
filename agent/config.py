@@ -16,7 +16,7 @@ else:
 CONFIG_FILE = BASE_DIR / "agent_state.json"
 SERVER_URL_FILE = BASE_DIR / "server_url.txt"
 DISCOVERY_TOPIC = "amvion-emp-monitor-vinith-2026"
-DEFAULT_PUBLIC_URL = "http://127.0.0.1:8000"
+DEFAULT_PUBLIC_URL = "https://amvion-employee-monitoring.onrender.com"
 
 def get_hardware_uuid() -> str:
     """Extract Windows MachineGuid from Registry or generate deterministic fallback."""

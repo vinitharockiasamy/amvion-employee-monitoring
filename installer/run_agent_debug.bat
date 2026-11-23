@@ -7,7 +7,7 @@ echo   EMPLOYEE MONITORING AGENT - LIVE DEBUG MODE
 echo ==========================================================
 echo.
 
-set "SERVER_URL=https://accordingly-savings-edge-helped.trycloudflare.com"
+set "SERVER_URL=https://amvion-employee-monitoring.onrender.com"
 if exist "%~dp0server_url.txt" (
     set /p SERVER_URL=<"%~dp0server_url.txt"
 )

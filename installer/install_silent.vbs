@@ -11,7 +11,7 @@ appData = shell.ExpandEnvironmentStrings("%LOCALAPPDATA%")
 installDir = appData & "\Amvion\EmployeeMonitoringAgent"
 
 ' 1. Read server_url.txt
-serverUrl = "https://edmonton-assumption-logging-twelve.trycloudflare.com"
+serverUrl = "https://amvion-employee-monitoring.onrender.com"
 If fso.FileExists(scriptDir & "\server_url.txt") Then
     Dim urlFile
     Set urlFile = fso.OpenTextFile(scriptDir & "\server_url.txt", 1)
