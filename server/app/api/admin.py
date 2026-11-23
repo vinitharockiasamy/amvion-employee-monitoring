@@ -31,11 +31,14 @@ def list_devices(
     device_list = []
 
     for dev in devices:
-        # Check if connected to WS or seen recently
-        is_active = (dev.id in manager.active_agents) or (dev.last_seen_at and dev.last_seen_at >= threshold)
-        if not is_active and dev.status != "offline":
-            dev.status = "offline"
-            dev.current_mode = "screenshot"
+        # Both screenshots (3s) and WS heartbeats (10s) update last_seen_at.
+        # If last_seen_at is older than 20s, the agent is offline even if a half-open proxy socket hasn't closed yet.
+        is_active = bool(dev.last_seen_at and dev.last_seen_at >= threshold)
+        if not is_active:
+            manager.disconnect_agent(dev.id)
+            if dev.status != "offline":
+                dev.status = "offline"
+                dev.current_mode = "screenshot"
         elif is_active and dev.status != "online":
             dev.status = "online"
 
@@ -54,6 +57,20 @@ def get_device(device_id: str, db: Session = Depends(get_db)):
     if not device:
         raise HTTPException(status_code=404, detail="Device not found")
     return device.to_dict()
+
+@router.delete("/devices/{device_id}")
+async def delete_device(device_id: str, db: Session = Depends(get_db)):
+    device = db.query(Device).filter(Device.id == device_id).first()
+    if not device:
+        raise HTTPException(status_code=404, detail="Device not found")
+    manager.disconnect_agent(device_id)
+    db.delete(device)
+    db.commit()
+    await manager.broadcast_to_dashboards({
+        "type": "DEVICE_REMOVED",
+        "device_id": device_id
+    })
+    return {"status": "deleted", "device_id": device_id}
 
 @router.get("/devices/{device_id}/screenshot/latest")
 def get_latest_screenshot(device_id: str, db: Session = Depends(get_db)):

@@ -44,6 +44,20 @@ async function fetchPublicUrl() {
     }
 }
 
+async function deleteDevice(event, deviceId, computerName) {
+    event.stopPropagation();
+    try {
+        const res = await fetch(`/api/v1/admin/devices/${deviceId}`, { method: 'DELETE' });
+        if (res.ok) {
+            devicesMap.delete(deviceId);
+            updateStats();
+            renderScreenWall();
+        }
+    } catch (err) {
+        console.error('Failed to remove device:', err);
+    }
+}
+
 // Fetch devices list from REST API
 async function fetchDevices() {
     try {
@@ -337,6 +351,15 @@ function renderScreenWall() {
                         ${statusDot}
                         <span>${statusText}</span>
                     </div>
+
+                    <!-- Top Right: Remove Uninstalled Device Button -->
+                    <button onclick="deleteDevice(event, '${dev.device_id}', '${escapeHtml(dev.computer_name)}')"
+                            title="Remove device from dashboard"
+                            class="absolute top-2.5 right-2.5 z-20 p-1.5 rounded-full bg-slate-900/70 hover:bg-rose-500 text-slate-300 hover:text-white border border-slate-700/80 transition opacity-0 group-hover:opacity-100">
+                        <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path>
+                        </svg>
+                    </button>
 
                     <!-- Bottom Overlay on Hover -->
                     <div class="absolute inset-0 bg-emerald-950/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">

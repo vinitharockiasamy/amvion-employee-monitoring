@@ -44,7 +44,8 @@ async def presence_watchdog():
             with SessionLocal() as db:
                 devices = db.query(Device).filter(Device.status == "online").all()
                 for dev in devices:
-                    if dev.id not in websocket.manager.active_agents and dev.last_seen_at < threshold:
+                    if not dev.last_seen_at or dev.last_seen_at < threshold:
+                        websocket.manager.disconnect_agent(dev.id)
                         dev.status = "offline"
                         dev.current_mode = "screenshot"
                         await websocket.manager.broadcast_to_dashboards({
