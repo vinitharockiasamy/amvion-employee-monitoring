@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+build/
+dist/
+*.spec
+*.log
+*.db
+server/monitoring.db
+server/storage/screenshots/*
+agent/agent_state.json
+cloudflared.exe
+EmployeeMonitoringAgent-Setup.zip

@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: amvion-employee-monitoring
+    runtime: docker
+    plan: free
+    autoDeploy: true
+    envVars:
+      - key: PORT
+        value: 8000
+      - key: ORG_ENROLLMENT_KEY
+        value: amvion-enterprise-secret-key-2026
