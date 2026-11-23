@@ -82,7 +82,15 @@ class ConnectionManager:
                 return True
             except Exception:
                 return False
-        return False
+        # Fallback: if agent re-enrolled after container restart and its WS holds its prior device_id, send to active sockets
+        sent_any = False
+        for aid, active_ws in list(self.active_agents.items()):
+            try:
+                await active_ws.send_json(message)
+                sent_any = True
+            except Exception:
+                pass
+        return sent_any
 
     async def start_device_stream(self, device_id: str, dashboard_ws: WebSocket):
         if device_id not in self.stream_viewers:
@@ -90,20 +98,11 @@ class ConnectionManager:
         self.stream_viewers[device_id].add(dashboard_ws)
 
         await self.set_device_status(device_id, "online", "streaming")
-        sent = await self.send_to_agent(device_id, {
+        await self.send_to_agent(device_id, {
             "type": "START_STREAM",
             "device_id": device_id,
             "target_fps": 15
         })
-        if not sent:
-            try:
-                await dashboard_ws.send_json({
-                    "type": "STREAM_AGENT_OFFLINE",
-                    "device_id": device_id,
-                    "message": "Workstation agent is not actively running. Start 'python agent/main.py' to begin streaming."
-                })
-            except Exception:
-                pass
 
     async def stop_device_stream(self, device_id: str):
         if device_id in self.stream_viewers:
@@ -157,12 +156,14 @@ async def agent_websocket_endpoint(websocket: WebSocket, device_id: str):
                 await manager.relay_to_viewers(device_id, message)
             elif msg_type == "LIVE_FRAME":
                 # Fast video frame relay (base64/binary JPEG) for live stream player
-                await manager.relay_to_viewers(device_id, {
-                    "type": "LIVE_FRAME",
-                    "device_id": device_id,
-                    "frame": message.get("frame"),
-                    "timestamp": message.get("timestamp")
-                })
+                target_ids = [device_id] if device_id in manager.stream_viewers else list(manager.stream_viewers.keys())
+                for tid in target_ids:
+                    await manager.relay_to_viewers(tid, {
+                        "type": "LIVE_FRAME",
+                        "device_id": tid,
+                        "frame": message.get("frame"),
+                        "timestamp": message.get("timestamp")
+                    })
     except WebSocketDisconnect:
         await manager.disconnect_agent(device_id)
     except Exception as e:

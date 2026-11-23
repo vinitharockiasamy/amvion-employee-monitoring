@@ -71,6 +71,11 @@ class AgentNetworkClient:
                     config.device_id = None
                     config.device_secret = None
                     await self.enroll_if_needed(force=True)
+                    if self.ws:
+                        try:
+                            await self.ws.close()
+                        except Exception:
+                            pass
                     return False
                 return res.status_code == 200
         except Exception as e:

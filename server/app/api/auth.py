@@ -1,3 +1,4 @@
+import uuid
 from datetime import datetime
 from fastapi import APIRouter, Header, HTTPException, Depends, status
 from pydantic import BaseModel
@@ -58,8 +59,10 @@ def enroll_device(
         device.last_seen_at = datetime.utcnow()
         device.updated_at = datetime.utcnow()
     else:
-        # Create new device record
+        # Deterministic device_id derived from hardware_uuid so it never changes across container restarts
+        deterministic_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, payload.hardware_uuid))
         device = Device(
+            id=deterministic_id,
             hardware_uuid=payload.hardware_uuid,
             computer_name=payload.computer_name,
             employee_name=payload.employee_name,

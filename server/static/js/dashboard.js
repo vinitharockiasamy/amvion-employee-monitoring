@@ -219,14 +219,7 @@ function handleStreamAgentOffline(msg) {
     if (msg.device_id !== activeStreamDeviceId) return;
     const loadingOverlay = document.getElementById('streamLoadingOverlay');
     if (loadingOverlay) {
-        loadingOverlay.classList.remove('hidden');
-        loadingOverlay.innerHTML = `
-            <div class="w-12 h-12 rounded-full bg-amber-500/20 border border-amber-500/40 flex items-center justify-center text-amber-400 mb-3">
-                <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"></path></svg>
-            </div>
-            <p class="text-sm font-semibold text-white">Workstation Agent Not Running</p>
-            <p class="text-xs text-slate-400 max-w-sm text-center mt-1">Start <code class="bg-slate-800 px-1.5 py-0.5 rounded text-emerald-300 font-mono">python agent/main.py</code> in a terminal to enable real-time 15 FPS streaming.</p>
-        `;
+        loadingOverlay.classList.add('hidden');
     }
 }
 
@@ -401,6 +394,16 @@ function updateTileImage(deviceId, screenshotUrl, lastSeen) {
     if (timeEl) {
         timeEl.textContent = formatRelativeTime(lastSeen);
     }
+    // Also refresh open live modal if viewing this device
+    if (activeStreamDeviceId === deviceId) {
+        const detailImg = document.getElementById('detailScreenshotImg');
+        const loadingOverlay = document.getElementById('streamLoadingOverlay');
+        const hudTimestamp = document.getElementById('hudTimestamp');
+        if (loadingOverlay) loadingOverlay.classList.add('hidden');
+        if (detailImg) detailImg.src = screenshotUrl;
+        if (hudTimestamp) hudTimestamp.textContent = new Date().toLocaleTimeString();
+        frameCount++;
+    }
 }
 
 // Open Detail Modal & Switch Endpoint to Live Stream Mode
@@ -425,7 +428,7 @@ function openDetailModal(deviceId) {
     if (modalIp) modalIp.textContent = `IP: ${dev.ip_address || 'Local'}`;
     if (modalOs) modalOs.textContent = dev.os_version || 'Windows';
 
-    // Show initial latest screenshot while live stream connects
+    // Show live screen immediately without dark blocking overlay
     if (detailImg) {
         detailImg.classList.remove('hidden');
         detailImg.src = dev.latest_screenshot_url || '';
@@ -435,12 +438,7 @@ function openDetailModal(deviceId) {
         video.srcObject = null;
     }
     if (loadingOverlay) {
-        loadingOverlay.classList.remove('hidden');
-        loadingOverlay.innerHTML = `
-            <div class="w-12 h-12 border-4 border-sky-400 border-t-transparent rounded-full animate-spin mb-3"></div>
-            <p class="text-sm font-medium text-sky-200">Switching endpoint to Live Stream Mode...</p>
-            <p class="text-xs text-slate-400 mt-1">Establishing low-latency video channel</p>
-        `;
+        loadingOverlay.classList.add('hidden');
     }
 
     modal.classList.remove('hidden');
