@@ -26,7 +26,7 @@ class AgentNetworkClient:
         payload = get_system_metadata()
 
         try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
+            async with httpx.AsyncClient(timeout=15.0) as client:
                 res = await client.post(url, headers=headers, json=payload)
                 if res.status_code == 200:
                     data = res.json()
@@ -38,12 +38,10 @@ class AgentNetworkClient:
                     print(f"[Client] Enrollment SUCCESS. Device ID: {config.device_id}")
                     return True
                 else:
-                    print(f"[Client] Enrollment returned {res.status_code}. Checking for updated server URL...")
-                    await asyncio.to_thread(config.discover_public_url)
+                    print(f"[Client] Enrollment returned {res.status_code}: {res.text}")
                     return False
         except Exception as e:
-            print(f"[Client] Enrollment network error: {e}. Checking for updated server URL...")
-            await asyncio.to_thread(config.discover_public_url)
+            print(f"[Client] Enrollment network error: {e}")
             return False
 
     async def upload_screenshot(self, image_bytes: bytes, resolution: str) -> bool:
@@ -66,7 +64,7 @@ class AgentNetworkClient:
         }
 
         try:
-            async with httpx.AsyncClient(timeout=8.0) as client:
+            async with httpx.AsyncClient(timeout=12.0) as client:
                 res = await client.post(url, headers=headers, files=files, data=data)
                 if res.status_code == 401:
                     print("[Client] Stale credentials rejected by server (401). Automatically re-enrolling device identity...")
@@ -74,14 +72,9 @@ class AgentNetworkClient:
                     config.device_secret = None
                     await self.enroll_if_needed(force=True)
                     return False
-                elif res.status_code in (502, 503, 504, 530):
-                    # Tunnel endpoint rotated; discover new live URL
-                    await asyncio.to_thread(config.discover_public_url)
-                    return False
                 return res.status_code == 200
         except Exception as e:
             print(f"[Client] Screenshot upload failed: {e}")
-            await asyncio.to_thread(config.discover_public_url)
             return False
 
     async def send_ws_message(self, message: dict):
@@ -103,7 +96,6 @@ class AgentNetworkClient:
                     self.ws = ws
                     print("[Client] WebSocket CONNECTED to Central Server.")
 
-                    # Start periodic heartbeat inside connection
                     heartbeat_task = asyncio.create_task(self._heartbeat_loop())
 
                     try:
@@ -127,8 +119,7 @@ class AgentNetworkClient:
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                print(f"[Client] WebSocket disconnected: {e}. Checking URL & reconnecting in 3s...")
-                await asyncio.to_thread(config.discover_public_url)
+                print(f"[Client] WebSocket disconnected: {e}. Reconnecting in 3s...")
                 await asyncio.sleep(3)
 
     async def _heartbeat_loop(self):

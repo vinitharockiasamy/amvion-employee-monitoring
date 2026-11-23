@@ -4,18 +4,15 @@ import uuid
 import socket
 import platform
 import sys
-import httpx
 from pathlib import Path
 
 if getattr(sys, "frozen", False):
-    # When packaged as standalone PyInstaller executable
     BASE_DIR = Path(sys.executable).resolve().parent
 else:
     BASE_DIR = Path(__file__).resolve().parent
 
 CONFIG_FILE = BASE_DIR / "agent_state.json"
 SERVER_URL_FILE = BASE_DIR / "server_url.txt"
-DISCOVERY_TOPIC = "amvion-emp-monitor-vinith-2026"
 DEFAULT_PUBLIC_URL = "https://amvion-employee-monitoring.onrender.com"
 
 def get_hardware_uuid() -> str:
@@ -28,8 +25,6 @@ def get_hardware_uuid() -> str:
                 return str(guid).strip()
     except Exception:
         pass
-    
-    # Fallback to node-based uuid
     return str(uuid.uuid5(uuid.NAMESPACE_DNS, socket.gethostname()))
 
 def get_system_metadata() -> dict:
@@ -39,6 +34,14 @@ def get_system_metadata() -> dict:
         "os_version": f"{platform.system()} {platform.release()} ({platform.version()})",
         "hardware_uuid": get_hardware_uuid()
     }
+
+def _is_valid_active_url(u: str) -> bool:
+    if not u or not u.startswith("http"):
+        return False
+    # Ignore obsolete temporary tunnels or old private hotspot IPs
+    if "trycloudflare.com" in u or "10.79." in u or "192.168." in u:
+        return False
+    return True
 
 class AgentConfig:
     def __init__(self):
@@ -53,34 +56,7 @@ class AgentConfig:
         
         self.load_state()
 
-    def discover_public_url(self) -> bool:
-        """Query the permanent discovery channel for the latest active public tunnel URL."""
-        try:
-            r = httpx.get(f"https://ntfy.sh/{DISCOVERY_TOPIC}/raw?poll=1", timeout=6.0)
-            if r.status_code == 200:
-                lines = [
-                    line.strip()
-                    for line in r.text.splitlines()
-                    if line.strip().startswith("https://") and ("trycloudflare.com" in line or "onrender.com" in line or "railway.app" in line or "koyeb.app" in line or "hf.space" in line)
-                ]
-                if lines:
-                    latest_url = lines[-1].rstrip("/")
-                    if latest_url != self.server_url:
-                        print(f"[Config] Discovered active public server URL: {latest_url}")
-                        self.server_url = latest_url
-                        try:
-                            with open(SERVER_URL_FILE, "w") as f:
-                                f.write(latest_url + "\n")
-                        except Exception:
-                            pass
-                        self.save_state()
-                        return True
-        except Exception as e:
-            print(f"[Config] Discovery check skipped: {e}")
-        return False
-
     def load_state(self):
-        # 1. Check for persisted agent state
         saved_server_url = None
         if CONFIG_FILE.exists():
             try:
@@ -93,21 +69,25 @@ class AgentConfig:
             except Exception as e:
                 print(f"[Config] Error loading state: {e}")
 
-        # 2. Check for explicit server_url.txt
-        target_url = saved_server_url or self.server_url
+        target_url = DEFAULT_PUBLIC_URL
         if SERVER_URL_FILE.exists():
             try:
                 with open(SERVER_URL_FILE, "r") as f:
-                    u = f.read().strip()
-                    if u.startswith("http"):
-                        target_url = u.rstrip("/")
+                    u = f.read().strip().rstrip("/")
+                    if _is_valid_active_url(u):
+                        target_url = u
             except Exception:
                 pass
 
-        self.server_url = target_url
+        if saved_server_url and saved_server_url != target_url:
+            self.device_id = None
+            self.device_secret = None
 
-        # 3. Automatically check permanent discovery channel for the latest live public URL
-        self.discover_public_url()
+        self.server_url = target_url
+        try:
+            SERVER_URL_FILE.write_text(self.server_url + "\n", encoding="utf-8")
+        except Exception:
+            pass
 
     def save_state(self):
         try:

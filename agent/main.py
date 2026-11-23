@@ -13,6 +13,86 @@ from agent.compressor import ImageCompressor
 from agent.streamer import LiveStreamer
 from agent.client import AgentNetworkClient
 
+def self_install_if_needed():
+    """If the standalone EXE is launched from Downloads/Zip/Desktop, self-install into %LOCALAPPDATA% and start background daemon."""
+    if not getattr(sys, "frozen", False):
+        return
+    try:
+        import subprocess
+        import ctypes
+        import winreg
+        from pathlib import Path
+
+        local_appdata = os.environ.get("LOCALAPPDATA")
+        if not local_appdata:
+            return
+
+        install_dir = Path(local_appdata) / "Amvion" / "EmployeeMonitoringAgent"
+        target_exe = install_dir / "EmployeeMonitoringAgent.exe"
+        current_exe = Path(sys.executable).resolve()
+
+        if current_exe == target_exe.resolve():
+            return
+
+        # 1. Stop any older running background instance (excluding our own PID)
+        my_pid = os.getpid()
+        subprocess.run(
+            ["taskkill", "/F", "/FI", f"PID ne {my_pid}", "/IM", "EmployeeMonitoringAgent.exe"],
+            capture_output=True,
+            creationflags=0x08000000
+        )
+        time.sleep(0.8)
+
+        # 2. Create install directory & wipe stale state
+        install_dir.mkdir(parents=True, exist_ok=True)
+        state_file = install_dir / "agent_state.json"
+        if state_file.exists():
+            try:
+                state_file.unlink()
+            except Exception:
+                pass
+
+        # 3. Copy raw bytes (strips Windows Mark-of-the-Web Zone.Identifier automatically)
+        target_exe.write_bytes(current_exe.read_bytes())
+        (install_dir / "server_url.txt").write_text(config.server_url + "\n", encoding="utf-8")
+
+        # 4. Register Windows Startup in HKCU Run
+        try:
+            with winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER,
+                r"Software\Microsoft\Windows\CurrentVersion\Run",
+                0,
+                winreg.KEY_SET_VALUE
+            ) as key:
+                winreg.SetValueEx(key, "EmployeeMonitoringAgent", 0, winreg.REG_SZ, f'"{target_exe}"')
+        except Exception:
+            pass
+
+        # 5. Launch installed background agent
+        subprocess.Popen(
+            [str(target_exe)],
+            cwd=str(install_dir),
+            creationflags=0x08000000
+        )
+
+        # 6. Show confirmation popup and exit installer process
+        ctypes.windll.user32.MessageBoxW(
+            0,
+            f"Employee Monitoring Agent installed and connected!\n\n"
+            f"Server: {config.server_url}\n"
+            f"Status: Running silently in background (3s refresh).\n"
+            f"Auto-Start: Enabled (Zero boot security prompts).",
+            "Amvion Monitoring Agent",
+            0x40
+        )
+        sys.exit(0)
+    except SystemExit:
+        raise
+    except Exception:
+        pass
+
+self_install_if_needed()
+
 # If running without a console window (noconsole/pythonw), redirect output to agent.log
 if sys.stdout is None or sys.stderr is None:
     try:
