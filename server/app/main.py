@@ -145,7 +145,7 @@ async def health_check():
         storage_ok = settings.STORAGE_DIR.exists()
         return {
             "status": "healthy" if storage_ok else "degraded",
-            "version": "1.2.0",
+            "version": app.version,
             "database": "sqlite-wal" if IS_SQLITE else "postgresql",
             "storage_ready": storage_ok,
             "time": datetime.utcnow().isoformat() + "Z",
