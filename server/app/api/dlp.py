@@ -374,7 +374,11 @@ def list_dlp_events(
     if event_type and event_type != "all":
         q = q.filter(DlpEvent.event_type == event_type.strip().upper())
     if channel and channel != "all":
-        q = q.filter(DlpEvent.channel == channel.strip())
+        ch_val = channel.strip()
+        if ch_val in ("USB/removable_storage", "USB / Removable Storage"):
+            q = q.filter(DlpEvent.channel.in_(["USB/removable_storage", "USB / Removable Storage"]))
+        else:
+            q = q.filter(DlpEvent.channel == ch_val)
     if risk_level and risk_level != "all":
         q = q.filter(DlpEvent.risk_level == risk_level.strip().lower())
     if search and search.strip():

@@ -64,6 +64,9 @@ def _default_dlp_settings() -> dict:
         "monitor_removable_storage": True,
         "evidence_enabled": evidence_enabled,
         "maximum_evidence_size_mb": max_mb_val,
+        "baseline_hash_max_mb": 100,
+        "recycle_bin_recovery_enabled": True,
+        "secondary_backup_directories": [],
         "evidence_events": [
             "CREATED",
             "MODIFIED",

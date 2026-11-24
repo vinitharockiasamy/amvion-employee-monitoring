@@ -21,7 +21,7 @@ from server.app.api import auth, agent, admin, websocket, dlp
 app = FastAPI(
     title=settings.PROJECT_NAME,
     description="Enterprise Employee Productivity & DLP Monitoring Console",
-    version="1.1.0",
+    version="1.2.0",
 )
 
 app.add_middleware(
@@ -145,7 +145,7 @@ async def health_check():
         storage_ok = settings.STORAGE_DIR.exists()
         return {
             "status": "healthy" if storage_ok else "degraded",
-            "version": "1.1.0",
+            "version": "1.2.0",
             "database": "sqlite-wal" if IS_SQLITE else "postgresql",
             "storage_ready": storage_ok,
             "time": datetime.utcnow().isoformat() + "Z",

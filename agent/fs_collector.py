@@ -1,5 +1,6 @@
 import os
 import ctypes
+import struct
 import string
 import asyncio
 import hashlib
@@ -21,7 +22,7 @@ IGNORED_FILENAMES: Set[str] = {
     "agent.log",
     "server_url.txt",
     "indexervolumeguid",
-    "wpSettings.dat".lower(),
+    "wpsettings.dat",
 }
 
 IGNORED_EXTENSIONS: Set[str] = {
@@ -86,6 +87,8 @@ class FileSnapshot:
     sha256: Optional[str] = None
     blob_id: Optional[str] = None
     removable_root_key: Optional[str] = None
+    is_baseline: bool = False
+    baseline_timestamp: Optional[str] = None
 
 
 @dataclass
@@ -102,6 +105,226 @@ class DetectedFileChange:
     known_blob_id: Optional[str] = None
     removable_volume: Optional[str] = None
     volume_label: Optional[str] = None
+    was_baseline: bool = False
+
+
+@dataclass
+class RecycleBinMatch:
+    payload_path: str
+    original_path: str
+    file_size: int
+    sha256: Optional[str] = None
+    size_exceeded_ceiling: bool = False
+
+
+def parse_recycle_bin_metadata_file(i_file_path: str) -> Optional[Tuple[int, int, str]]:
+    """
+    Parse a Windows $Ixxxxxx metadata header (Version 1 Vista/Win7 or Version 2 Win8/10/11).
+    Returns (original_size_bytes, deletion_filetime_100ns, original_full_path) or None.
+    """
+    try:
+        raw = Path(i_file_path).read_bytes()
+        if len(raw) < 28:
+            return None
+        version, orig_size, del_filetime = struct.unpack_from("<QQQ", raw, 0)
+        if version == 2:
+            char_count = struct.unpack_from("<I", raw, 24)[0]
+            byte_len = min(len(raw) - 28, char_count * 2)
+            if byte_len <= 0:
+                return None
+            orig_path = raw[28:28 + byte_len].decode("utf-16-le", errors="replace").rstrip("\x00")
+        elif version == 1:
+            orig_path = raw[24:544].decode("utf-16-le", errors="replace").split("\x00", 1)[0]
+        else:
+            return None
+
+        if not orig_path:
+            return None
+        return int(orig_size), int(del_filetime), orig_path
+    except Exception:
+        return None
+
+
+def _iter_recycle_bin_i_files(
+    deleted_source_path: str,
+    custom_recycle_roots: Optional[List[str]] = None,
+    max_candidates: int = 300,
+) -> List[Tuple[int, str, str]]:
+    """
+    Collect (mtime_ns, i_file_path, r_companion_path) from custom test roots or
+    the current user's accessible <Drive>:\\$Recycle.Bin\\<SID> directories.
+    """
+    search_dirs: List[str] = []
+    if custom_recycle_roots:
+        for r in custom_recycle_roots:
+            if not r:
+                continue
+            rp = Path(r)
+            if rp.is_dir():
+                search_dirs.append(str(rp))
+                try:
+                    for sub in os.scandir(rp):
+                        if sub.is_dir(follow_symlinks=False):
+                            search_dirs.append(sub.path)
+                except OSError:
+                    pass
+    elif os.name == "nt" and deleted_source_path:
+        drive, _ = os.path.splitdrive(os.path.abspath(deleted_source_path))
+        if drive:
+            rb_root = Path(f"{drive}\\$Recycle.Bin")
+            try:
+                if rb_root.exists():
+                    for sid_dir in os.scandir(rb_root):
+                        try:
+                            if sid_dir.is_dir(follow_symlinks=False):
+                                search_dirs.append(sid_dir.path)
+                        except OSError:
+                            continue
+            except OSError:
+                pass
+
+    candidates: List[Tuple[int, str, str]] = []
+    seen_i: Set[str] = set()
+    for sdir in search_dirs:
+        try:
+            with os.scandir(sdir) as it:
+                for entry in it:
+                    try:
+                        if not entry.name.startswith("$I") or len(entry.name) < 3:
+                            continue
+                        if not entry.is_file(follow_symlinks=False):
+                            continue
+                        norm_i = os.path.normcase(entry.path)
+                        if norm_i in seen_i:
+                            continue
+                        seen_i.add(norm_i)
+                        r_companion = os.path.join(sdir, "$R" + entry.name[2:])
+                        st = entry.stat(follow_symlinks=False)
+                        candidates.append((st.st_mtime_ns, entry.path, r_companion))
+                    except OSError:
+                        continue
+        except (PermissionError, FileNotFoundError, OSError):
+            continue
+
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    return candidates[:max_candidates]
+
+
+def find_in_windows_recycle_bin(
+    deleted_source_path: str,
+    expected_size: Optional[int] = None,
+    expected_sha256: Optional[str] = None,
+    custom_recycle_roots: Optional[List[str]] = None,
+) -> Optional[RecycleBinMatch]:
+    """
+    Locate a deleted file inside the Windows Recycle Bin without restoring or moving it.
+    Supports both direct file deletion ($Rxxxxxx.ext) and parent-folder deletion ($Rxxxxxx\\subpath).
+    Verifies SHA-256 against expected_sha256 when known.
+    """
+    if not deleted_source_path:
+        return None
+
+    target_abs = os.path.abspath(deleted_source_path)
+    target_norm = os.path.normcase(target_abs)
+
+    i_candidates = _iter_recycle_bin_i_files(
+        deleted_source_path=target_abs,
+        custom_recycle_roots=custom_recycle_roots,
+    )
+
+    for _mtime_ns, i_path, r_companion in i_candidates:
+        parsed = parse_recycle_bin_metadata_file(i_path)
+        if not parsed:
+            continue
+        _meta_size, _del_ft, orig_path = parsed
+        orig_abs = os.path.abspath(orig_path)
+        orig_norm = os.path.normcase(orig_abs)
+
+        payload_candidate: Optional[Path] = None
+        r_obj = Path(r_companion)
+
+        if orig_norm == target_norm and r_obj.is_file():
+            payload_candidate = r_obj
+        elif target_norm.startswith(orig_norm.rstrip(os.sep) + os.sep) and r_obj.is_dir():
+            rel_tail = target_abs[len(orig_abs.rstrip("\\/")):].lstrip("\\/")
+            nested = r_obj / rel_tail
+            if nested.is_file():
+                payload_candidate = nested
+
+        if payload_candidate is None:
+            continue
+
+        try:
+            st = os.stat(payload_candidate)
+        except OSError:
+            continue
+
+        if expected_size is not None and expected_size >= 0 and st.st_size != expected_size and expected_sha256:
+            # If we know exact baseline hash & size and size differs, keep looking for newer/exact item
+            pass
+
+        sha, read_sz, err = compute_file_sha256(str(payload_candidate))
+        if err == "exceeds_hash_ceiling":
+            return RecycleBinMatch(
+                payload_path=str(payload_candidate),
+                original_path=orig_abs,
+                file_size=st.st_size,
+                sha256=expected_sha256,
+                size_exceeded_ceiling=True,
+            )
+        if err or sha is None:
+            continue
+
+        if expected_sha256 and sha != expected_sha256:
+            # Content differs from baseline SHA-256 (e.g. older deleted item at same path); keep checking
+            continue
+
+        return RecycleBinMatch(
+            payload_path=str(payload_candidate),
+            original_path=orig_abs,
+            file_size=read_sz if read_sz is not None else st.st_size,
+            sha256=sha,
+        )
+
+    return None
+
+
+def find_in_secondary_backups(
+    file_name: str,
+    expected_size: Optional[int],
+    expected_sha256: Optional[str],
+    backup_directories: List[str],
+) -> Optional[Tuple[str, int, str]]:
+    """
+    Optional secondary fallback: check administrator-configured backup/shadow directories
+    for a verified SHA-256 copy when primary & Recycle Bin sources are unavailable.
+    Never matches by filename alone; requires cryptographic SHA-256 match.
+    """
+    if not expected_sha256 or not backup_directories:
+        return None
+
+    for bdir in backup_directories:
+        if not bdir:
+            continue
+        bpath = Path(bdir)
+        if not bpath.is_dir():
+            continue
+        try:
+            for cand in bpath.rglob(file_name):
+                try:
+                    if not cand.is_file():
+                        continue
+                    st = cand.stat()
+                    if expected_size is not None and st.st_size != expected_size:
+                        continue
+                    sha, sz, err = compute_file_sha256(str(cand))
+                    if not err and sha == expected_sha256:
+                        return str(cand), (sz if sz is not None else st.st_size), sha
+                except OSError:
+                    continue
+        except OSError:
+            continue
+    return None
 
 
 def _list_windows_drive_roots() -> List[str]:
@@ -290,11 +513,13 @@ class FilesystemEventCollector:
         agent_config=None,
         max_depth: int = 16,
         volume_detector: Optional[Callable[[], List[RemovableVolumeInfo]]] = None,
+        recycle_bin_roots: Optional[List[str]] = None,
     ):
         self.client = client
         self.config = agent_config or default_config
         self.max_depth = max_depth
         self.running = False
+        self._custom_recycle_roots = recycle_bin_roots
 
         self._default_detector = WindowsRemovableVolumeDetector()
         self._volume_detector: Callable[[], List[RemovableVolumeInfo]] = (
@@ -323,6 +548,10 @@ class FilesystemEventCollector:
     def active_removable_volumes(self) -> List[RemovableVolumeInfo]:
         return list(self._active_removable_volumes.values())
 
+    def get_baseline_snapshot(self) -> Dict[str, FileSnapshot]:
+        """Expose current indexed snapshot metadata for diagnostics and automated tests."""
+        return dict(self._snapshot)
+
     def get_monitored_roots(self) -> List[Path]:
         """Resolve configured local directories using AgentConfig.resolve_monitored_directories()."""
         try:
@@ -341,7 +570,7 @@ class FilesystemEventCollector:
         return valid_roots
 
     def _match_removable_volume(self, file_path: Optional[str]) -> Optional[RemovableVolumeInfo]:
-        if not file_path:
+        if not file_path or file_path == "Recycle Bin":
             return None
         for root_key, vol_info in self._active_removable_volumes.items():
             if _path_is_within_prefix(file_path, root_key):
@@ -364,7 +593,7 @@ class FilesystemEventCollector:
 
         if vol is not None:
             direction: Optional[str] = None
-            if source_path and destination_path:
+            if source_path and destination_path and destination_path != "Recycle Bin":
                 if src_vol is None and dst_vol is not None:
                     direction = "local_to_removable"
                 elif src_vol is not None and dst_vol is None:
@@ -376,7 +605,7 @@ class FilesystemEventCollector:
         # Fallback drive check if an explicit non-system drive path was configured
         sys_drive = os.environ.get("SystemDrive", "C:").rstrip("\\/").lower()
         for p in (source_path, destination_path):
-            if p:
+            if p and p != "Recycle Bin":
                 drive, _ = os.path.splitdrive(p)
                 if drive and sys_drive and drive.lower() != sys_drive:
                     return USB_CHANNEL_NAME, "high", RemovableVolumeInfo(mount_point=drive + "\\"), None
@@ -489,13 +718,37 @@ class FilesystemEventCollector:
             print(f"[DLP] Removable volume discovery warning: {exc}")
             return []
 
+    def _populate_baseline_metadata(self, entries: Dict[str, FileSnapshot]):
+        """
+        Compute SHA-256 content identity on readable baseline files (up to baseline_hash_max_mb)
+        and stamp baseline=True + baseline_timestamp WITHOUT uploading any files to the vault.
+        """
+        dlp_cfg = self.config.dlp or {}
+        hash_max_mb = float(dlp_cfg.get("baseline_hash_max_mb", 100))
+        hash_max_bytes = int(hash_max_mb * 1024 * 1024)
+        baseline_ts = datetime.now(timezone.utc).isoformat()
+
+        for snap in entries.values():
+            snap.is_baseline = True
+            snap.baseline_timestamp = baseline_ts
+            if 0 < snap.size <= hash_max_bytes and snap.sha256 is None:
+                sha, _, err = compute_file_sha256(snap.path, max_bytes=hash_max_bytes)
+                if sha and not err:
+                    snap.sha256 = sha
+            elif snap.size == 0 and snap.sha256 is None:
+                snap.sha256 = hashlib.sha256(b"").hexdigest()
+
     def initialize_baseline(self) -> int:
-        """Capture initial local and connected removable volume state without emitting file flood events."""
+        """
+        Capture initial local and connected removable volume metadata (including SHA-256 when readable)
+        without uploading pre-existing files or emitting flood events.
+        """
         self._active_removable_volumes.clear()
         for vol in self._discover_volumes_safe():
             self._active_removable_volumes[vol.normalized_key] = vol
 
         snap, _ = self._scan_directory_tree()
+        self._populate_baseline_metadata(snap)
         self._snapshot = snap
         self._initialized = True
         return len(self._snapshot)
@@ -513,25 +766,21 @@ class FilesystemEventCollector:
         connected: List[RemovableVolumeInfo] = []
         disconnected: List[RemovableVolumeInfo] = []
 
-        # 1. Handle disconnected volumes first
         for old_key in list(self._active_removable_volumes.keys()):
             if old_key not in current_by_key:
                 vol_info = self._active_removable_volumes.pop(old_key)
                 disconnected.append(vol_info)
-                # Purge snapshot entries belonging to the unplugged volume without false DELETED events
                 for snap_k in [
                     k for k, s in self._snapshot.items()
                     if s.removable_root_key == old_key or _path_is_within_prefix(s.path, old_key)
                 ]:
                     self._snapshot.pop(snap_k, None)
 
-        # 2. Handle newly connected volumes
         visited_dirs: Set[Tuple[int, int]] = set()
         for new_key, vol_info in current_by_key.items():
             if new_key not in self._active_removable_volumes:
                 self._active_removable_volumes[new_key] = vol_info
                 connected.append(vol_info)
-                # Baseline-index pre-existing files on the newly mounted removable volume
                 vol_entries: Dict[str, FileSnapshot] = {}
                 self._scan_root_into(
                     Path(vol_info.mount_point),
@@ -539,6 +788,7 @@ class FilesystemEventCollector:
                     out=vol_entries,
                     removable_root_key=new_key,
                 )
+                self._populate_baseline_metadata(vol_entries)
                 self._snapshot.update(vol_entries)
 
         return connected, disconnected
@@ -546,7 +796,6 @@ class FilesystemEventCollector:
     async def _emit_volume_lifecycle_event(self, vol: RemovableVolumeInfo, event_type: str):
         """Emit DRIVE_CONNECTED or DRIVE_DISCONNECTED audit event using the unified DLP event pipeline."""
         now_ns = int(datetime.now(timezone.utc).timestamp() * 1_000_000_000)
-        # Round connect/disconnect idempotency bucket to 1 second per mount cycle
         idem_key = generate_idempotency_key(
             endpoint_id=self.config.device_id or "local-endpoint",
             event_type=event_type,
@@ -603,7 +852,6 @@ class FilesystemEventCollector:
         current_map, unreachable_rem_keys = self._scan_directory_tree()
         prev_map = dict(self._snapshot)
 
-        # If a removable drive vanished mid-scan before sync_removable_volumes ran, purge cleanly
         if unreachable_rem_keys:
             for rem_key in unreachable_rem_keys:
                 self._active_removable_volumes.pop(rem_key, None)
@@ -652,6 +900,8 @@ class FilesystemEventCollector:
                 if old_snap.size == new_snap.size and old_snap.mtime_ns == new_snap.mtime_ns:
                     new_snap.sha256 = old_snap.sha256
                     new_snap.blob_id = old_snap.blob_id
+                new_snap.is_baseline = old_snap.is_baseline
+                new_snap.baseline_timestamp = old_snap.baseline_timestamp
 
                 old_parent = os.path.normcase(os.path.dirname(old_snap.path))
                 new_parent = os.path.normcase(os.path.dirname(new_snap.path))
@@ -668,16 +918,15 @@ class FilesystemEventCollector:
                     target_path=new_snap.path,
                     known_sha256=new_snap.sha256,
                     known_blob_id=new_snap.blob_id,
+                    was_baseline=old_snap.is_baseline,
                 ))
 
         remaining_disappeared = disappeared_keys - matched_old
         remaining_appeared = appeared_keys - matched_new
 
-        # 2. Cross-volume / non-inode MOVED detection (e.g. Local <-> USB removable volume)
-        # Across distinct volumes (C:\ NTFS <-> USB FAT32/exFAT), st_dev/st_ino differ.
-        # Pair ONLY when unambiguous 1-to-1 match by (size + known SHA-256) OR (same filename + size + preserved mtime).
+        # 2. Cross-volume / copy+unlink MOVED detection (Local <-> Local across partitions OR Local <-> USB)
+        # Pair ONLY when unambiguous 1-to-1 match by exact (size + SHA-256) OR cross-volume (filename + size + preserved mtime).
         if remaining_disappeared and remaining_appeared:
-            # First try exact known SHA-256 + size match
             old_with_sha = [
                 k for k in remaining_disappeared
                 if prev_map[k].sha256 and prev_map[k].size > 0
@@ -693,9 +942,12 @@ class FilesystemEventCollector:
                 for k in list(remaining_appeared):
                     s = current_map[k]
                     if s.size in candidate_sizes and s.size > 0:
-                        sha, _, err = compute_file_sha256(s.path)
-                        if sha and not err:
-                            s.sha256 = sha
+                        sha = s.sha256
+                        if not sha:
+                            sha, _, err = compute_file_sha256(s.path)
+                            if sha and not err:
+                                s.sha256 = sha
+                        if sha:
                             new_by_sha.setdefault((s.size, sha), []).append(k)
 
                 for sig, ok_list in old_by_sha.items():
@@ -708,6 +960,8 @@ class FilesystemEventCollector:
                         remaining_disappeared.discard(old_k)
                         remaining_appeared.discard(new_k)
                         new_snap.blob_id = old_snap.blob_id
+                        new_snap.is_baseline = old_snap.is_baseline
+                        new_snap.baseline_timestamp = old_snap.baseline_timestamp
 
                         old_parent = os.path.normcase(os.path.dirname(old_snap.path))
                         new_parent = os.path.normcase(os.path.dirname(new_snap.path))
@@ -724,15 +978,15 @@ class FilesystemEventCollector:
                             target_path=new_snap.path,
                             known_sha256=new_snap.sha256,
                             known_blob_id=new_snap.blob_id,
+                            was_baseline=old_snap.is_baseline,
                         ))
 
-            # Second, for baseline files (sha256 not yet computed) moved across volumes:
-            # match unambiguously by identical normalized filename + non-zero size + preserved mtime (<= 2.1s FAT32 tolerance)
+            # Fallback for giant files (> baseline_hash_max_mb) moved across volumes where sha256 wasn't pre-computed
             if remaining_disappeared and remaining_appeared:
                 old_by_namesize: Dict[Tuple[str, int], List[str]] = {}
                 for k in remaining_disappeared:
                     s = prev_map[k]
-                    if s.size > 0:
+                    if s.size > 0 and s.sha256 is None:
                         old_by_namesize.setdefault((os.path.normcase(s.name), s.size), []).append(k)
 
                 new_by_namesize: Dict[Tuple[str, int], List[str]] = {}
@@ -746,11 +1000,12 @@ class FilesystemEventCollector:
                     if len(ok_list) == 1 and len(nk_list) == 1:
                         old_snap = prev_map[ok_list[0]]
                         new_snap = current_map[nk_list[0]]
-                        # Require different volumes/roots and preserved modification timestamp within FAT32 2s granularity
-                        if (
+                        different_volume = (
                             old_snap.removable_root_key != new_snap.removable_root_key
-                            and abs(old_snap.mtime_ns - new_snap.mtime_ns) <= 2_100_000_000
-                        ):
+                            or old_snap.dev != new_snap.dev
+                            or old_snap.ino == 0
+                        )
+                        if different_volume and abs(old_snap.mtime_ns - new_snap.mtime_ns) <= 2_100_000_000:
                             remaining_disappeared.discard(ok_list[0])
                             remaining_appeared.discard(nk_list[0])
                             changes.append(DetectedFileChange(
@@ -762,12 +1017,15 @@ class FilesystemEventCollector:
                                 file_size=new_snap.size,
                                 mtime_ns=new_snap.mtime_ns,
                                 target_path=new_snap.path,
+                                was_baseline=old_snap.is_baseline,
                             ))
 
         # 3. Existing paths: case-only RENAMED and content MODIFIED
         for k in sorted(common_keys):
             old_snap = prev_map[k]
             curr_snap = current_map[k]
+            curr_snap.is_baseline = old_snap.is_baseline
+            curr_snap.baseline_timestamp = old_snap.baseline_timestamp
 
             if old_snap.name != curr_snap.name:
                 changes.append(DetectedFileChange(
@@ -781,6 +1039,7 @@ class FilesystemEventCollector:
                     target_path=curr_snap.path,
                     known_sha256=old_snap.sha256 if (old_snap.size == curr_snap.size and old_snap.mtime_ns == curr_snap.mtime_ns) else None,
                     known_blob_id=old_snap.blob_id if (old_snap.size == curr_snap.size and old_snap.mtime_ns == curr_snap.mtime_ns) else None,
+                    was_baseline=old_snap.is_baseline,
                 ))
 
             if old_snap.size != curr_snap.size or old_snap.mtime_ns != curr_snap.mtime_ns:
@@ -793,51 +1052,70 @@ class FilesystemEventCollector:
                     file_size=curr_snap.size,
                     mtime_ns=curr_snap.mtime_ns,
                     target_path=curr_snap.path,
+                    was_baseline=old_snap.is_baseline,
                 ))
             else:
                 curr_snap.sha256 = old_snap.sha256
                 curr_snap.blob_id = old_snap.blob_id
 
-        # 4. Newly appeared files: check unambiguous cross-tier COPIED (Local <-> Removable) via SHA-256, else CREATED
+        # 4. Newly appeared files: check reliable SHA-256 COPIED correlation across ALL monitored directories
+        # (Local -> Local, Local -> USB, USB -> Local) without ever matching by filename alone!
+        pre_existing_pool_keys = common_keys | matched_new
         for new_k in sorted(remaining_appeared):
             new_snap = current_map[new_k]
-            matched_copy_source: Optional[str] = None
+            matched_copy_source: Optional[FileSnapshot] = None
 
-            if self._active_removable_volumes and new_snap.size > 0:
-                new_is_removable = new_snap.removable_root_key is not None
-                opposite_candidates = [
-                    s for k_cand, s in current_map.items()
-                    if k_cand != new_k
-                    and (s.removable_root_key is not None) != new_is_removable
-                    and s.size == new_snap.size
+            if new_snap.size > 0:
+                size_candidates = [
+                    current_map[k_cand]
+                    for k_cand in pre_existing_pool_keys
+                    if k_cand in current_map
+                    and k_cand != new_k
+                    and current_map[k_cand].size == new_snap.size
                 ]
-                if 1 <= len(opposite_candidates) <= 5:
+                if 1 <= len(size_candidates) <= 15:
                     new_sha = new_snap.sha256
                     if not new_sha:
                         new_sha, _, err = compute_file_sha256(new_snap.path)
                         if new_sha and not err:
                             new_snap.sha256 = new_sha
                     if new_sha:
-                        exact_matches: List[FileSnapshot] = []
-                        for cand in opposite_candidates:
+                        sha_matches: List[FileSnapshot] = []
+                        for cand in size_candidates:
                             c_sha = cand.sha256
                             if not c_sha:
                                 c_sha, _, c_err = compute_file_sha256(cand.path)
                                 if c_sha and not c_err:
                                     cand.sha256 = c_sha
                             if c_sha == new_sha:
-                                exact_matches.append(cand)
-                        if len(exact_matches) == 1:
-                            matched_copy_source = exact_matches[0].path
-                            if exact_matches[0].blob_id and not new_snap.blob_id:
-                                new_snap.blob_id = exact_matches[0].blob_id
+                                sha_matches.append(cand)
 
-            if matched_copy_source:
+                        if len(sha_matches) == 1:
+                            matched_copy_source = sha_matches[0]
+                        elif len(sha_matches) > 1:
+                            # Disambiguate multi-hop chains (e.g. Docs -> Desktop, then Desktop -> USB):
+                            # 1) Prefer exact filename match if unique
+                            same_name = [
+                                c for c in sha_matches
+                                if os.path.normcase(c.name) == os.path.normcase(new_snap.name)
+                            ]
+                            pool = same_name if same_name else sha_matches
+                            if len(pool) == 1:
+                                matched_copy_source = pool[0]
+                            elif len(pool) > 1:
+                                # 2) If copying onto USB, check if unique most-recently-written source exists
+                                sorted_by_mtime = sorted(pool, key=lambda c: c.mtime_ns, reverse=True)
+                                if sorted_by_mtime[0].mtime_ns > sorted_by_mtime[1].mtime_ns:
+                                    matched_copy_source = sorted_by_mtime[0]
+
+            if matched_copy_source is not None:
+                if matched_copy_source.blob_id and not new_snap.blob_id:
+                    new_snap.blob_id = matched_copy_source.blob_id
                 changes.append(DetectedFileChange(
                     event_type="COPIED",
                     file_name=new_snap.name,
                     file_extension=new_snap.extension,
-                    source_path=matched_copy_source,
+                    source_path=matched_copy_source.path,
                     destination_path=new_snap.path,
                     file_size=new_snap.size,
                     mtime_ns=new_snap.mtime_ns,
@@ -845,6 +1123,8 @@ class FilesystemEventCollector:
                     known_sha256=new_snap.sha256,
                     known_blob_id=new_snap.blob_id,
                 ))
+                # Add newly confirmed file to pool so sequential copies in one cycle can chain cleanly
+                pre_existing_pool_keys.add(new_k)
             else:
                 changes.append(DetectedFileChange(
                     event_type="CREATED",
@@ -862,6 +1142,8 @@ class FilesystemEventCollector:
         # 5. DELETED files
         for old_k in sorted(remaining_disappeared):
             old_snap = prev_map[old_k]
+            # Level 1 opportunistic check: if still accessible right now (e.g. pending handle), allow reading
+            still_accessible_path = old_snap.path if os.path.isfile(old_snap.path) else None
             changes.append(DetectedFileChange(
                 event_type="DELETED",
                 file_name=old_snap.name,
@@ -870,34 +1152,85 @@ class FilesystemEventCollector:
                 destination_path=None,
                 file_size=old_snap.size,
                 mtime_ns=old_snap.mtime_ns,
-                target_path=None,
+                target_path=still_accessible_path,
                 known_sha256=old_snap.sha256,
                 known_blob_id=old_snap.blob_id,
+                was_baseline=old_snap.is_baseline,
             ))
 
         self._snapshot = current_map
         return changes
 
     async def _process_change(self, change: DetectedFileChange):
-        """Compute SHA-256 when accessible, upload eligible evidence, and submit or queue the DLP event."""
+        """
+        Multi-level evidence resolution & metadata preservation:
+          - Level 1: Accessible file or previously archived SHA-256 blob -> CAPTURED
+          - Level 2: Windows Recycle Bin ($Recycle.Bin $I/$R) fallback -> CAPTURED_FROM_RECYCLE_BIN
+          - Level 3: Permanent deletion (Shift+Delete) + optional secondary backup dirs -> CAPTURED or NOT_CAPTURED_UNAVAILABLE
+          - Level 4: Configured maximum_evidence_size_mb enforced across all levels -> NOT_CAPTURED_SIZE_LIMIT
+        """
         dlp_cfg = self.config.dlp or {}
         evidence_enabled = bool(dlp_cfg.get("evidence_enabled", True))
         max_mb = float(dlp_cfg.get("maximum_evidence_size_mb", 25))
         max_evidence_bytes = int(max_mb * 1024 * 1024)
         evidence_events = {str(e).upper() for e in dlp_cfg.get("evidence_events", [])}
+        rb_enabled = bool(dlp_cfg.get("recycle_bin_recovery_enabled", True))
+        custom_rb_roots = self._custom_recycle_roots or dlp_cfg.get("recycle_bin_roots")
+        backup_dirs = list(dlp_cfg.get("secondary_backup_directories") or [])
 
         sha256_hex: Optional[str] = change.known_sha256
         actual_size: Optional[int] = change.file_size
         hash_error: Optional[str] = None
+        effective_destination = change.destination_path
+        upload_source_path: Optional[str] = change.target_path
+        recovered_from_recycle_bin = False
+        recovered_from_backup = False
 
-        if change.target_path and not sha256_hex:
+        # Hash accessible target_path when not already known
+        if upload_source_path and not sha256_hex:
             sha256_hex, read_bytes, hash_error = await asyncio.to_thread(
                 compute_file_sha256,
-                change.target_path,
+                upload_source_path,
             )
             if read_bytes is not None:
                 actual_size = read_bytes
 
+        # Multi-level DELETE inspection (Recycle Bin & optional secondary backup directories)
+        if change.event_type == "DELETED" and not upload_source_path:
+            if rb_enabled and change.source_path:
+                rb_match = await asyncio.to_thread(
+                    find_in_windows_recycle_bin,
+                    change.source_path,
+                    actual_size,
+                    sha256_hex,
+                    custom_rb_roots,
+                )
+                if rb_match is not None:
+                    effective_destination = "Recycle Bin"
+                    actual_size = rb_match.file_size
+                    if rb_match.sha256:
+                        sha256_hex = rb_match.sha256
+                    if not rb_match.size_exceeded_ceiling:
+                        upload_source_path = rb_match.payload_path
+                        recovered_from_recycle_bin = True
+
+            # Optional secondary backup/shadow-copy directory fallback when permanently deleted
+            if not upload_source_path and backup_dirs and sha256_hex:
+                b_match = await asyncio.to_thread(
+                    find_in_secondary_backups,
+                    change.file_name,
+                    actual_size,
+                    sha256_hex,
+                    backup_dirs,
+                )
+                if b_match is not None:
+                    b_path, b_size, b_sha = b_match
+                    upload_source_path = b_path
+                    actual_size = b_size
+                    sha256_hex = b_sha
+                    recovered_from_backup = True
+
+        # Persist computed hash into active snapshot for live files
         if change.target_path and sha256_hex:
             norm_k = os.path.normcase(os.path.abspath(change.target_path))
             snap = self._snapshot.get(norm_k)
@@ -907,25 +1240,26 @@ class FilesystemEventCollector:
         file_blob_id: Optional[str] = None
         evidence_status = "NOT_CAPTURED_DISABLED"
         needs_deferred_evidence = False
+        deferred_status_on_success = "CAPTURED_FROM_RECYCLE_BIN" if recovered_from_recycle_bin else "CAPTURED"
 
         if evidence_enabled and change.event_type in evidence_events:
-            if sha256_hex and sha256_hex in self._uploaded_blobs:
+            # Level 4: Always check configured size ceiling first so oversized files (even on DELETE)
+            # accurately report NOT_CAPTURED_SIZE_LIMIT rather than generic unavailability.
+            if actual_size is not None and actual_size > max_evidence_bytes:
+                evidence_status = "NOT_CAPTURED_SIZE_LIMIT"
+            elif actual_size is not None and actual_size == 0:
+                evidence_status = "NO_EVIDENCE"
+            elif sha256_hex and sha256_hex in self._uploaded_blobs:
                 file_blob_id = self._uploaded_blobs[sha256_hex]
-                evidence_status = "CAPTURED"
+                evidence_status = "CAPTURED_FROM_RECYCLE_BIN" if recovered_from_recycle_bin else "CAPTURED"
             elif change.known_blob_id:
                 file_blob_id = change.known_blob_id
                 evidence_status = "CAPTURED"
-            elif not change.target_path:
+            elif not upload_source_path or hash_error or sha256_hex is None:
                 evidence_status = "NOT_CAPTURED_UNAVAILABLE"
-            elif hash_error or sha256_hex is None:
-                evidence_status = "NOT_CAPTURED_UNAVAILABLE"
-            elif actual_size is not None and actual_size == 0:
-                evidence_status = "NO_EVIDENCE"
-            elif actual_size is not None and actual_size > max_evidence_bytes:
-                evidence_status = "NOT_CAPTURED_SIZE_LIMIT"
             else:
                 up_res = await self.client.upload_dlp_evidence(
-                    file_path=change.target_path,
+                    file_path=upload_source_path,
                     expected_sha256=sha256_hex,
                     original_filename=change.file_name,
                 )
@@ -933,10 +1267,11 @@ class FilesystemEventCollector:
                 if status_str == "ok" and up_res.get("file_id"):
                     file_blob_id = up_res["file_id"]
                     self._uploaded_blobs[sha256_hex] = file_blob_id
-                    evidence_status = "CAPTURED"
-                    norm_k = os.path.normcase(os.path.abspath(change.target_path))
-                    if norm_k in self._snapshot:
-                        self._snapshot[norm_k].blob_id = file_blob_id
+                    evidence_status = "CAPTURED_FROM_RECYCLE_BIN" if recovered_from_recycle_bin else "CAPTURED"
+                    if change.target_path:
+                        norm_k = os.path.normcase(os.path.abspath(change.target_path))
+                        if norm_k in self._snapshot:
+                            self._snapshot[norm_k].blob_id = file_blob_id
                 elif status_str in ("retry", "auth_error"):
                     needs_deferred_evidence = True
                     evidence_status = "NOT_CAPTURED_UNAVAILABLE"
@@ -948,7 +1283,7 @@ class FilesystemEventCollector:
             endpoint_id=endpoint_id or "local-endpoint",
             event_type=change.event_type,
             source_path=change.source_path,
-            destination_path=change.destination_path,
+            destination_path=effective_destination,
             file_size=actual_size,
             mtime_ns=change.mtime_ns,
             sha256=sha256_hex,
@@ -957,19 +1292,31 @@ class FilesystemEventCollector:
         channel, risk_level, rem_vol, transfer_dir = self._classify_event_context(
             change.event_type,
             change.source_path,
-            change.destination_path,
+            effective_destination,
         )
 
         configured_limit_val = int(max_mb) if max_mb.is_integer() else max_mb
         metadata = {
-            "file_path": change.destination_path or change.source_path,
+            "file_path": (
+                effective_destination
+                if (effective_destination and effective_destination != "Recycle Bin")
+                else change.source_path
+            ),
             "file_size": actual_size if actual_size is not None else 0,
             "file_extension": change.file_extension or "",
             "evidence_status": evidence_status,
             "maximum_evidence_size_mb": configured_limit_val,
+            "baseline": bool(change.was_baseline),
         }
         if sha256_hex:
             metadata["sha256"] = sha256_hex
+        if recovered_from_recycle_bin:
+            metadata["recovery_source"] = "windows_recycle_bin"
+        elif recovered_from_backup:
+            metadata["recovery_source"] = "secondary_backup"
+        elif change.event_type == "DELETED" and effective_destination != "Recycle Bin":
+            metadata["deletion_mode"] = "permanent_or_bypassed_recycle_bin"
+
         if rem_vol is not None:
             metadata["removable_volume"] = rem_vol.mount_point
             if rem_vol.label:
@@ -990,7 +1337,7 @@ class FilesystemEventCollector:
             "file_name": change.file_name,
             "file_extension": change.file_extension or None,
             "source_path": change.source_path,
-            "destination_path": change.destination_path,
+            "destination_path": effective_destination,
             "channel": channel,
             "application_name": None,
             "risk_level": risk_level,
@@ -1001,8 +1348,9 @@ class FilesystemEventCollector:
 
         queue_item = {
             "payload": payload,
-            "target_path": change.target_path if needs_deferred_evidence else None,
+            "target_path": upload_source_path if needs_deferred_evidence else None,
             "expected_sha256": sha256_hex if needs_deferred_evidence else None,
+            "success_evidence_status": deferred_status_on_success,
             "attempts": 0,
         }
 
@@ -1027,7 +1375,7 @@ class FilesystemEventCollector:
             if up_res.get("status") == "ok" and up_res.get("file_id"):
                 blob_id = up_res["file_id"]
                 payload["file_blob_id"] = blob_id
-                payload["metadata"]["evidence_status"] = "CAPTURED"
+                payload["metadata"]["evidence_status"] = item.get("success_evidence_status", "CAPTURED")
                 self._uploaded_blobs[item["expected_sha256"]] = blob_id
                 item["target_path"] = None
             elif up_res.get("status") in ("retry", "auth_error") and item["attempts"] < 3:

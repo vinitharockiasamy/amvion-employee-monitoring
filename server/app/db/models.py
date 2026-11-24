@@ -133,6 +133,7 @@ class DlpEvent(Base):
         raw_status = str(parsed_meta.get("evidence_status") or "").strip()
         legacy_map = {
             "CAPTURED": "CAPTURED",
+            "CAPTURED_FROM_RECYCLE_BIN": "CAPTURED_FROM_RECYCLE_BIN",
             "archived": "CAPTURED",
             "NOT_CAPTURED_SIZE_LIMIT": "NOT_CAPTURED_SIZE_LIMIT",
             "exceeds_size_limit": "NOT_CAPTURED_SIZE_LIMIT",
@@ -146,10 +147,14 @@ class DlpEvent(Base):
             "empty_file": "NO_EVIDENCE",
         }
         if has_blob:
-            evidence_status = "CAPTURED"
+            evidence_status = (
+                "CAPTURED_FROM_RECYCLE_BIN"
+                if raw_status == "CAPTURED_FROM_RECYCLE_BIN"
+                else "CAPTURED"
+            )
         else:
             evidence_status = legacy_map.get(raw_status, "NO_EVIDENCE")
-            if evidence_status == "CAPTURED":
+            if evidence_status in ("CAPTURED", "CAPTURED_FROM_RECYCLE_BIN"):
                 evidence_status = "NO_EVIDENCE"
 
         parsed_meta["evidence_status"] = evidence_status

@@ -787,11 +787,14 @@ function renderDlpTable() {
 
         const evStatusCode = ev.evidence_status || (ev.metadata && ev.metadata.evidence_status) || 'NO_EVIDENCE';
         const configuredMaxMb = (ev.metadata && ev.metadata.maximum_evidence_size_mb) || 25;
+        const unavailReason = ev.event_type === 'DELETED'
+            ? 'File unavailable after deletion'
+            : 'File unavailable or locked';
         const evStatusReasons = {
             'NOT_CAPTURED_SIZE_LIMIT': `File exceeds ${configuredMaxMb} MB evidence limit`,
             'exceeds_size_limit': `File exceeds ${configuredMaxMb} MB evidence limit`,
-            'NOT_CAPTURED_UNAVAILABLE': 'File unavailable or deleted before capture',
-            'locked_or_unavailable': 'File unavailable or deleted before capture',
+            'NOT_CAPTURED_UNAVAILABLE': unavailReason,
+            'locked_or_unavailable': unavailReason,
             'upload_failed': 'File unavailable during upload',
             'NOT_CAPTURED_DISABLED': 'Evidence capture disabled by policy',
             'disabled_by_policy': 'Evidence capture disabled by policy',
@@ -799,18 +802,24 @@ function renderDlpTable() {
             'not_applicable': 'Volume lifecycle event'
         };
         const statusReasonText = evStatusReasons[evStatusCode] || 'No file evidence attached';
+        const isRecycleBinCapture = evStatusCode === 'CAPTURED_FROM_RECYCLE_BIN' || (ev.metadata && ev.metadata.recovery_source === 'windows_recycle_bin');
+        const channelDisplay = ev.channel === 'USB/removable_storage' ? 'USB / Removable Storage' : (ev.channel || 'Local Disk');
+        const shaSnippet = (ev.metadata && ev.metadata.sha256) ? String(ev.metadata.sha256).slice(0, 12) + '…' : '';
 
         const actionBtns = ev.has_content && ev.file_blob_id
-            ? `<div class="inline-flex items-center space-x-1.5">
-                   <button onclick="openDlpPreviewModal('${ev.file_blob_id}')"
-                           class="px-2.5 py-1 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-semibold text-[11px] transition">
-                       View File
-                   </button>
-                   <a href="${dlUrl}" download
-                      class="px-2 py-1 rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-200 text-[11px] transition"
-                      title="Download original file">
-                       ↓
-                   </a>
+            ? `<div class="inline-flex flex-col items-end">
+                   <div class="inline-flex items-center space-x-1.5">
+                       <button onclick="openDlpPreviewModal('${ev.file_blob_id}')"
+                               class="px-2.5 py-1 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-semibold text-[11px] transition">
+                           View File
+                       </button>
+                       <a href="${dlUrl}" download
+                          class="px-2 py-1 rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-200 text-[11px] transition"
+                          title="Download original file">
+                           ↓
+                       </a>
+                   </div>
+                   ${isRecycleBinCapture ? '<span class="text-[10px] text-amber-300 mt-1 font-medium">Captured from Recycle Bin</span>' : ''}
                </div>`
             : `<div class="inline-flex flex-col items-end">
                    <span class="px-2 py-0.5 rounded bg-slate-700/70 border border-slate-600 text-[10px] font-semibold text-slate-300">Evidence Not Captured</span>
@@ -832,14 +841,14 @@ function renderDlpTable() {
                 </td>
                 <td class="py-3 px-4">
                     <div class="font-semibold text-slate-100 truncate max-w-[200px]" title="${escapeHtml(ev.file_name)}">${escapeHtml(ev.file_name)}</div>
-                    <div class="text-[11px] text-slate-400 font-mono">${formatBytes(ev.file_size)}</div>
+                    <div class="text-[11px] text-slate-400 font-mono">${formatBytes(ev.file_size)}${shaSnippet ? ` • <span title="SHA-256: ${escapeHtml(ev.metadata.sha256)}">${escapeHtml(shaSnippet)}</span>` : ''}</div>
                 </td>
                 <td class="py-3 px-4 font-mono text-[11px] text-slate-300">
                     <div class="truncate max-w-xs" title="${srcText}">${srcText}</div>
                     ${dstText}
                 </td>
                 <td class="py-3 px-4">
-                    <div class="font-medium text-slate-200">${escapeHtml(ev.channel)}</div>
+                    <div class="font-medium text-slate-200">${escapeHtml(channelDisplay)}</div>
                     ${ev.application_name ? `<div class="text-[11px] text-sky-300 font-mono">${escapeHtml(ev.application_name)}</div>` : ''}
                     ${metaNote ? `<div class="text-[11px] text-slate-400 truncate max-w-[200px]" title="${escapeHtml(metaNote)}">${escapeHtml(metaNote)}</div>` : ''}
                 </td>
