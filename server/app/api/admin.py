@@ -148,9 +148,28 @@ def get_public_url(request: Request):
             pass
     return {"public_url": url}
 
+@router.get("/download-msi")
+def download_agent_msi():
+    project_root = settings.BASE_DIR.parent
+    msi_path = project_root / "AMVION-SA-amvionenterprise-1.0.0.msi"
+    if not msi_path.exists():
+        raise HTTPException(status_code=404, detail="MSI installer package not found")
+    return FileResponse(
+        str(msi_path),
+        media_type="application/x-msi",
+        filename="AMVION-SA-amvionenterprise-1.0.0.msi"
+    )
+
 @router.get("/download-agent")
 def download_agent_zip(request: Request):
     project_root = settings.BASE_DIR.parent
+    msi_path = project_root / "AMVION-SA-amvionenterprise-1.0.0.msi"
+    if msi_path.exists():
+        return FileResponse(
+            str(msi_path),
+            media_type="application/x-msi",
+            filename="AMVION-SA-amvionenterprise-1.0.0.msi"
+        )
     installer_dir = project_root / "installer"
     zip_path = project_root / "EmployeeMonitoringAgent-Setup.zip"
 
