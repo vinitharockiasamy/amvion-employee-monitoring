@@ -39,9 +39,11 @@ class AgentNetworkClient:
                     return True
                 else:
                     print(f"[Client] Enrollment returned {res.status_code}: {res.text}")
+                    await asyncio.to_thread(config.discover_cloud_url)
                     return False
         except Exception as e:
             print(f"[Client] Enrollment network error: {e}")
+            await asyncio.to_thread(config.discover_cloud_url)
             return False
 
     async def upload_screenshot(self, image_bytes: bytes, resolution: str) -> bool:
@@ -66,8 +68,9 @@ class AgentNetworkClient:
         try:
             async with httpx.AsyncClient(timeout=12.0) as client:
                 res = await client.post(url, headers=headers, files=files, data=data)
-                if res.status_code == 401:
-                    print("[Client] Stale credentials rejected by server (401). Automatically re-enrolling device identity...")
+                if res.status_code in (401, 404):
+                    print(f"[Client] Server returned {res.status_code}. Refreshing cloud URL & enrollment...")
+                    await asyncio.to_thread(config.discover_cloud_url)
                     config.device_id = None
                     config.device_secret = None
                     await self.enroll_if_needed(force=True)
