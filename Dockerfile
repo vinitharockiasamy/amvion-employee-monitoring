@@ -8,7 +8,7 @@ RUN pip install --no-cache-dir fastapi uvicorn[standard] sqlalchemy jinja2 pytho
 
 # Copy application code and signed Windows MSI installer package
 COPY server ./server
-COPY AMVION-SA-amvionenterprise-1.0.0.msi ./AMVION-SA-amvionenterprise-1.0.0.msi
+COPY EMP-SA-enterprise-1.0.0.msi ./EMP-SA-enterprise-1.0.0.msi
 COPY run_server.py .
 
 EXPOSE 8000

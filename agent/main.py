@@ -27,7 +27,7 @@ def self_install_if_needed():
         if not local_appdata:
             return
 
-        install_dir = Path(local_appdata) / "Amvion" / "EmployeeMonitoringAgent"
+        install_dir = Path(local_appdata) / "EmployeeMonitoring" / "Agent"
         target_exe = install_dir / "EmployeeMonitoringAgent.exe"
         current_exe = Path(sys.executable).resolve()
 
@@ -82,7 +82,7 @@ def self_install_if_needed():
             f"Server: {config.server_url}\n"
             f"Status: Running silently in background (3s refresh).\n"
             f"Auto-Start: Enabled (Zero boot security prompts).",
-            "Amvion Monitoring Agent",
+            "Employee Monitoring Agent",
             0x40
         )
         sys.exit(0)

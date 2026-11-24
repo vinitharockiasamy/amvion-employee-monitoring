@@ -22,7 +22,7 @@ except Exception:
 
 import uvicorn
 
-DISCOVERY_TOPIC = "amvion-emp-monitor-vinith-2026"
+DISCOVERY_TOPIC = "emp-monitor-vinith-2026"
 PUBLIC_URL_FILE = PROJECT_ROOT / "PUBLIC_URL.txt"
 INSTALLER_URL_FILE = PROJECT_ROOT / "installer" / "server_url.txt"
 CLOUDFLARED_BIN = PROJECT_ROOT / "cloudflared.exe"

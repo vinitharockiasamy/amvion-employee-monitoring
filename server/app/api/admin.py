@@ -141,34 +141,29 @@ def _resolve_active_public_url(request: Request) -> Optional[str]:
 @router.get("/public-url")
 def get_public_url(request: Request):
     url = _resolve_active_public_url(request)
-    if url and url.startswith("https://"):
-        try:
-            httpx.post("https://ntfy.sh/amvion-emp-monitor-vinith-2026", content=url, timeout=3.0)
-        except Exception:
-            pass
     return {"public_url": url}
 
 @router.get("/download-msi")
 def download_agent_msi():
     project_root = settings.BASE_DIR.parent
-    msi_path = project_root / "AMVION-SA-amvionenterprise-1.0.0.msi"
+    msi_path = project_root / "EMP-SA-enterprise-1.0.0.msi"
     if not msi_path.exists():
         raise HTTPException(status_code=404, detail="MSI installer package not found")
     return FileResponse(
         str(msi_path),
         media_type="application/x-msi",
-        filename="AMVION-SA-amvionenterprise-1.0.0.msi"
+        filename="EMP-SA-enterprise-1.0.0.msi"
     )
 
 @router.get("/download-agent")
 def download_agent_zip(request: Request):
     project_root = settings.BASE_DIR.parent
-    msi_path = project_root / "AMVION-SA-amvionenterprise-1.0.0.msi"
+    msi_path = project_root / "EMP-SA-enterprise-1.0.0.msi"
     if msi_path.exists():
         return FileResponse(
             str(msi_path),
             media_type="application/x-msi",
-            filename="AMVION-SA-amvionenterprise-1.0.0.msi"
+            filename="EMP-SA-enterprise-1.0.0.msi"
         )
     installer_dir = project_root / "installer"
     zip_path = project_root / "EmployeeMonitoringAgent-Setup.zip"

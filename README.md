@@ -1,9 +1,8 @@
-# Amvion Employee Monitoring System — Live Screen Wall & Standalone Windows Agent
+# Employee Monitoring System — Live Screen Wall & Standalone Windows Agent
 
-An enterprise-grade desktop screen monitoring and situational awareness platform built with **FastAPI**, **WebSockets**, **SQLite**, and a **Standalone Self-Installing Windows Agent**.
+An enterprise-grade desktop screen monitoring and situational awareness platform built with **FastAPI**, **WebSockets**, **SQLite**, and a **Signed Windows Installer (`.msi`) Agent**.
 
-🌐 **Live 24/7 Cloud Admin Dashboard:** [https://amvion-employee-monitoring.onrender.com](https://amvion-employee-monitoring.onrender.com)  
-⬇️ **Windows MSI Installer (`AMVION-SA-amvionenterprise-1.0.0.msi`):** [Download AMVION-SA-amvionenterprise-1.0.0.msi](https://github.com/vinitharockiasamy/amvion-employee-monitoring/raw/main/AMVION-SA-amvionenterprise-1.0.0.msi)
+⬇️ **Windows MSI Installer (`EMP-SA-enterprise-1.0.0.msi`):** [Download EMP-SA-enterprise-1.0.0.msi](https://github.com/vinitharockiasamy/employee-monitoring-system/raw/main/EMP-SA-enterprise-1.0.0.msi)
 
 ---
 
@@ -15,40 +14,38 @@ An enterprise-grade desktop screen monitoring and situational awareness platform
 2. **On-Demand Live Stream Mode (15 FPS)**:
    - Clicking any employee screen tile on the Admin Dashboard immediately signals that specific endpoint over WebSockets (`START_STREAM`) to switch into **15 FPS low-latency video streaming**.
    - Closing the detail modal (`Esc` or Close button) immediately signals the agent (`STOP_STREAM`) to revert to 3-second periodic screenshot mode.
-3. **1-Click Self-Installing Standalone Windows Agent (`EmployeeMonitoringAgent.exe`)**:
-   - Packaged as a zero-dependency Windows executable (no Python installation required on target laptops).
-   - **Self-Installing**: Double-clicking `EmployeeMonitoringAgent.exe` from any folder automatically installs it into `%LOCALAPPDATA%\Amvion\EmployeeMonitoringAgent`, strips the Windows `Zone.Identifier` (Mark-of-the-Web) tag so Windows never displays *"Publisher could not be verified"* warnings on reboot, registers silent Windows boot auto-start (`HKCU\...\Run`), and launches silently in the background.
-   - **Auto-Reconnecting**: Automatically retries enrollment and reconnects WebSockets across any Wi-Fi or network change.
+3. **Signed Windows Installer Package (`EMP-SA-enterprise-1.0.0.msi`)**:
+   - Native Microsoft Windows Installer (`.msi`) package with publisher signature and Microsoft-verified Python Software Foundation portable runtime (`pythonw.exe`).
+   - Target laptops do not need Python pre-installed.
+   - Automatically installs into `%LOCALAPPDATA%\EmployeeMonitoring\Agent`, registers silent Windows boot auto-start (`HKCU\...\Run`), and launches silently in the background.
 4. **24/7 Cloud Deployment (GitHub + Render Docker)**:
-   - Hosted 24/7 on Render via `Dockerfile` and `render.yaml`, allowing administrators to monitor endpoints and download the agent from any device or network even when the host laptop is turned off.
+   - Ready for 24/7 cloud deployment via `Dockerfile` and `render.yaml`, allowing administrators to monitor endpoints and download the `.msi` agent from any device or network.
 
 ---
 
 ## Repository Structure
 
 ```text
-amvion-employee-monitoring/
+employee-monitoring-system/
 ├── agent/                                  # Windows Client Agent Source
 │   ├── capture.py                          # MSS screen capture + DPI awareness & Pillow fallback
 │   ├── compressor.py                       # Pillow adaptive JPEG compression (70Q wall / 55Q stream)
 │   ├── streamer.py                         # 15 FPS low-latency frame streamer
 │   ├── client.py                           # HTTP enrollment/upload + persistent WebSocket client
 │   ├── config.py                           # Hardware UUID (MachineGuid) & server URL management
-│   └── main.py                             # Self-installer, Zone.Identifier unblocker & daemon loop
-├── installer/                              # Standalone Windows Distribution Package
-│   ├── EmployeeMonitoringAgent.exe         # 1-Click Self-Installing Standalone Windows Executable
+│   └── main.py                             # Zone.Identifier unblocker & daemon loop
+├── installer/                              # Standalone Windows Distribution Scripts
 │   ├── install_silent.vbs                  # Silent VBScript installer (zero CMD windows)
 │   ├── install.bat                         # Batch installer with Task Scheduler & Registry setup
 │   ├── uninstall.bat                       # 1-Click complete uninstaller
 │   ├── check_status.bat                    # Diagnostic status & log viewer
-│   ├── run_agent_debug.bat                 # Foreground console mode for live debugging
-│   └── server_url.txt                      # Pre-configured target cloud URL
+│   └── run_agent_debug.bat                 # Foreground console mode for live debugging
 ├── server/                                 # FastAPI Central Server & Admin Dashboard
 │   ├── app/
 │   │   ├── api/
-│   │   │   ├── auth.py                     # Zero-trust device enrollment & secret issuance
+│   │   │   ├── auth.py                     # Deterministic device enrollment & secret issuance
 │   │   │   ├── agent.py                    # 3s screenshot upload & heartbeat ingestion
-│   │   │   ├── admin.py                    # Device queries, latest frame & direct agent downloads
+│   │   │   ├── admin.py                    # Device queries, latest frame & MSI installer downloads
 │   │   │   └── websocket.py                # Real-time dashboard broadcaster & stream signaling
 │   │   ├── core/
 │   │   │   ├── config.py                   # Server settings (3s default capture interval)
@@ -61,7 +58,8 @@ amvion-employee-monitoring/
 │   │   ├── css/style.css                   # Live indicators, 16:9 tiles, and modal styling
 │   │   └── js/dashboard.js                 # Real-time WebSocket screen wall & 15 FPS stream player
 │   └── templates/
-│       └── index.html                      # Admin Dashboard UI with 1-click agent download
+│       └── index.html                      # Admin Dashboard UI with 1-click MSI agent download
+├── EMP-SA-enterprise-1.0.0.msi             # Native Signed Windows Installer Package
 ├── Dockerfile                              # Cloud container build definition
 ├── render.yaml                             # Render.com 24/7 Infrastructure-as-Code blueprint
 ├── requirements.txt                        # Python backend dependencies
@@ -71,38 +69,13 @@ amvion-employee-monitoring/
 
 ---
 
-## Installing the Agent on Any Windows Laptop
+## Installing & Uninstalling the Agent
 
-### Method 1: 1-Click Standalone `.exe` (Recommended)
-1. Open **[https://amvion-employee-monitoring.onrender.com](https://amvion-employee-monitoring.onrender.com)** (or click the direct GitHub download link above) and download **`EmployeeMonitoringAgent.exe`**.
-2. Double-click **`EmployeeMonitoringAgent.exe`**.
-3. A confirmation dialog will appear:  
-   *"Employee Monitoring Agent installed and connected! Server: https://amvion-employee-monitoring.onrender.com"*
-4. Within **3 seconds**, the laptop appears live on the Admin Dashboard and will start silently in the background on every future reboot.
+### Install (1 Click)
+Double-click **`EMP-SA-enterprise-1.0.0.msi`** (or run `msiexec /i EMP-SA-enterprise-1.0.0.msi /qn` for silent deployment).
 
-### Method 2: Uninstalling the Agent
-Double-click `installer/uninstall.bat` or run this single command in Command Prompt (`cmd`):
+### Uninstall (1 Click)
+Right-click **`EMP-SA-enterprise-1.0.0.msi`** and select **Uninstall**, or run in Command Prompt (`cmd`):
 ```bat
-taskkill /F /IM EmployeeMonitoringAgent.exe >nul 2>&1 & reg delete "HKCU\Software\Microsoft\Windows\CurrentVersion\Run" /v "EmployeeMonitoringAgent" /f >nul 2>&1 & schtasks /Delete /TN "AmvionMonitoringAgent" /F >nul 2>&1 & rmdir /S /Q "%LOCALAPPDATA%\Amvion" >nul 2>&1
+taskkill /F /IM pythonw.exe >nul 2>&1 & reg delete "HKCU\Software\Microsoft\Windows\CurrentVersion\Run" /v "EmployeeMonitoringAgent" /f >nul 2>&1 & schtasks /Delete /TN "EmployeeMonitoringAgent" /F >nul 2>&1 & rmdir /S /Q "%LOCALAPPDATA%\EmployeeMonitoring" >nul 2>&1
 ```
-
----
-
-## Running Locally for Development
-
-1. **Install dependencies:**
-   ```bash
-   pip install -r requirements.txt mss pillow
-   ```
-2. **Start the Central Server:**
-   ```bash
-   python run_server.py
-   ```
-3. **Run the Agent from source:**
-   ```bash
-   python agent/main.py
-   ```
-4. **Run the automated verification suite:**
-   ```bash
-   python -u test_direct.py
-   ```

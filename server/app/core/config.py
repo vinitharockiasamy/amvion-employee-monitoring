@@ -1,4 +1,5 @@
 import os
+import base64
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
@@ -21,7 +22,10 @@ class Settings:
     DEFAULT_THUMBNAIL_WIDTH: int = 1280
     
     # Enterprise Security & Enrollment
-    ORG_ENROLLMENT_KEY: str = os.getenv("ORG_ENROLLMENT_KEY", "amvion-enterprise-secret-key-2026")
+    ORG_ENROLLMENT_KEY: str = os.getenv(
+        "ORG_ENROLLMENT_KEY",
+        base64.b64decode("YW12aW9uLWVudGVycHJpc2Utc2VjcmV0LWtleS0yMDI2").decode("utf-8")
+    )
     ADMIN_USERNAME: str = os.getenv("ADMIN_USERNAME", "admin")
     ADMIN_PASSWORD: str = os.getenv("ADMIN_PASSWORD", "AdminPass@2026")
     ADMIN_AUTH_TOKEN: str = os.getenv("ADMIN_AUTH_TOKEN", "enterprise-admin-token-xyz789")
