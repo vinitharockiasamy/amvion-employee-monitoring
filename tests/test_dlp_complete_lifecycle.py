@@ -511,6 +511,457 @@ class TestDlpCompleteLifecycle(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(chain[6][0], "DELETED")
         self.assertEqual(chain[6][2], USB_CHANNEL_NAME)
 
+    async def test_08_ntfs_junction_does_not_poison_sibling_monitored_root(self):
+        """Regression #1: NTFS junction inside Documents (e.g. Documents\\My Pictures -> Pictures) must never skip Pictures."""
+        import subprocess
+
+        downloads = self.docs.parent / "Downloads"
+        pictures = self.docs.parent / "Pictures"
+        downloads.mkdir(exist_ok=True)
+        pictures.mkdir(exist_ok=True)
+
+        existing_pic = pictures / "Existing_Photo.png"
+        existing_pic.write_bytes(b"\x89PNG\r\n\x1a\nEXISTING_PHOTO_DATA")
+        dl_doc = downloads / "Travel_Commercial_2026.docx"
+        dl_doc.write_bytes(b"PK\x03\x04TRAVEL_COMMERCIAL_2026_DOCX")
+
+        # Create real Windows NTFS junction Documents\My Pictures -> Pictures
+        junction_path = self.docs / "My Pictures"
+        if os.name == "nt":
+            subprocess.run(
+                ["cmd", "/c", "mklink", "/J", str(junction_path), str(pictures)],
+                check=True,
+                capture_output=True,
+            )
+
+        client = MockLifecycleClient()
+        cfg = _make_cfg([self.docs, downloads, pictures], monitor_removable_storage=False)
+        collector = FilesystemEventCollector(client=client, agent_config=cfg)
+        count = collector.initialize_baseline()
+
+        # Both Downloads\Travel_Commercial_2026.docx AND Pictures\Existing_Photo.png MUST be indexed (never 0 in Pictures!)
+        snap = collector.get_baseline_snapshot()
+        indexed_paths = {Path(s.path).resolve() for s in snap.values()}
+        self.assertEqual(count, 2)
+        self.assertIn(existing_pic.resolve(), indexed_paths)
+        self.assertIn(dl_doc.resolve(), indexed_paths)
+
+        # Cut + Paste (same-volume rename/move) from Downloads -> Pictures must emit MOVED, NOT blind DELETED!
+        moved_pic_doc = pictures / "Travel_Commercial_2026.docx"
+        dl_doc.rename(moved_pic_doc)
+        await collector.run_once()
+
+        self.assertEqual(len(client.posted_events), 1)
+        ev = client.posted_events[0]
+        self.assertEqual(ev["event_type"], "MOVED")
+        self.assertEqual(Path(ev["source_path"]).resolve(), dl_doc.resolve())
+        self.assertEqual(Path(ev["destination_path"]).resolve(), moved_pic_doc.resolve())
+        self.assertEqual(ev["metadata"]["evidence_status"], "CAPTURED")
+        if junction_path.exists() or os.path.lexists(junction_path):
+            os.rmdir(junction_path)
+
+    async def test_09_explorer_preserved_mtime_multihop_copy_and_locked_copy_deferral(self):
+        """Regression #2: Multi-hop copy2 preserving identical mtime_ns + Explorer '- Copy' + WinError 32 mid-copy lock deferral."""
+        downloads = self.docs.parent / "Downloads"
+        downloads.mkdir(exist_ok=True)
+        mounted = [RemovableVolumeInfo(mount_point=str(self.usb_vol), label="CORP_USB", filesystem="NTFS")]
+
+        src_doc = self.docs / "Quarterly_Plan.docx"
+        payload = b"PK\x03\x04QUARTERLY_PLAN_2026_EXACT_BYTES"
+        src_doc.write_bytes(payload)
+
+        client = MockLifecycleClient()
+        cfg = _make_cfg([self.docs, self.desktop, downloads])
+        collector = FilesystemEventCollector(
+            client=client,
+            agent_config=cfg,
+            volume_detector=lambda: list(mounted),
+        )
+        collector.initialize_baseline()
+
+        # Hop 1: Documents -> Desktop (shutil.copy2 preserves identical mtime_ns, NO os.utime!)
+        hop1_desk = self.desktop / "Quarterly_Plan.docx"
+        shutil.copy2(src_doc, hop1_desk)
+        await collector.run_once()
+        self.assertEqual(client.posted_events[-1]["event_type"], "COPIED")
+        self.assertEqual(Path(client.posted_events[-1]["source_path"]).resolve(), src_doc.resolve())
+        self.assertEqual(Path(client.posted_events[-1]["destination_path"]).resolve(), hop1_desk.resolve())
+
+        # Hop 2: Desktop -> Downloads (identical mtime_ns on BOTH Documents and Desktop; must pick Desktop!)
+        hop2_dl = downloads / "Quarterly_Plan.docx"
+        shutil.copy2(hop1_desk, hop2_dl)
+        await collector.run_once()
+        self.assertEqual(client.posted_events[-1]["event_type"], "COPIED")
+        self.assertEqual(Path(client.posted_events[-1]["source_path"]).resolve(), hop1_desk.resolve())
+        self.assertEqual(Path(client.posted_events[-1]["destination_path"]).resolve(), hop2_dl.resolve())
+
+        # Hop 3: Downloads -> USB (identical mtime_ns on Documents, Desktop, Downloads; must pick Downloads!)
+        hop3_usb = self.usb_vol / "Quarterly_Plan.docx"
+        shutil.copy2(hop2_dl, hop3_usb)
+        await collector.run_once()
+        self.assertEqual(client.posted_events[-1]["event_type"], "COPIED")
+        self.assertEqual(Path(client.posted_events[-1]["source_path"]).resolve(), hop2_dl.resolve())
+        self.assertEqual(Path(client.posted_events[-1]["destination_path"]).resolve(), hop3_usb.resolve())
+        self.assertEqual(client.posted_events[-1]["channel"], USB_CHANNEL_NAME)
+
+        # Same-folder Ctrl+C / Ctrl+V duplicate ("Quarterly_Plan - Copy.docx" inside Desktop)
+        same_folder_dup = self.desktop / "Quarterly_Plan - Copy.docx"
+        shutil.copy2(hop1_desk, same_folder_dup)
+        await collector.run_once()
+        self.assertEqual(client.posted_events[-1]["event_type"], "COPIED")
+        self.assertEqual(Path(client.posted_events[-1]["source_path"]).resolve(), hop1_desk.resolve())
+        self.assertEqual(Path(client.posted_events[-1]["destination_path"]).resolve(), same_folder_dup.resolve())
+
+        # Mid-copy WinError 32 sharing violation deferral: locked on cycle 1 -> deferred -> unlocked on cycle 2 -> COPIED!
+        locked_src = self.docs / "Locked_Source_Spec.docx"
+        locked_src.write_bytes(b"PK\x03\x04UNIQUE_LOCKED_COPY_PAYLOAD_2026")
+        await collector.run_once()
+
+        locked_target = downloads / "Locked_Source_Spec.docx"
+        shutil.copy2(locked_src, locked_target)
+        events_before = len(client.posted_events)
+
+        from agent import fs_collector as fsc_mod
+        real_hash_fn = fsc_mod.compute_file_sha256
+
+        def simulated_sharing_violation(p, *a, **kw):
+            if Path(p).resolve() == locked_target.resolve():
+                return None, None, "PermissionError: [WinError 32] The process cannot access the file"
+            return real_hash_fn(p, *a, **kw)
+
+        with patch("agent.fs_collector.compute_file_sha256", side_effect=simulated_sharing_violation):
+            await collector.run_once()
+        # Deferred on cycle 1 rather than emitting degraded CREATED / NOT_CAPTURED_UNAVAILABLE!
+        self.assertEqual(len(client.posted_events), events_before)
+
+        # Cycle 2: Explorer write lock released -> correlated as COPIED + CAPTURED!
+        await collector.run_once()
+        self.assertEqual(len(client.posted_events), events_before + 1)
+        self.assertEqual(client.posted_events[-1]["event_type"], "COPIED")
+        self.assertEqual(Path(client.posted_events[-1]["destination_path"]).resolve(), locked_target.resolve())
+        self.assertEqual(client.posted_events[-1]["metadata"]["evidence_status"], "CAPTURED")
+
+    async def test_10_realistic_operations_across_all_nine_file_extensions(self):
+        """Section 2: Verify CREATE, MODIFY, RENAME, COPY, MOVE, and DELETE across PDF, DOCX, JPG, PNG, MP4, ZIP, EXE, DWG, and custom extension."""
+        sample_specs = [
+            ("Spec_Doc.pdf", ".pdf", b"%PDF-1.7\nCorporate engineering spec\n"),
+            ("Board_Notes.docx", ".docx", b"PK\x03\x04DOCX_OOXML_ARCHIVE_PAYLOAD"),
+            ("Site_Photo.jpg", ".jpg", b"\xff\xd8\xff\xe0\x00\x10JFIF_PHOTO_DATA"),
+            ("Diagram_Export.png", ".png", b"\x89PNG\r\n\x1a\nPNG_IMAGE_PAYLOAD"),
+            ("Training_Clip.mp4", ".mp4", b"\x00\x00\x00\x18ftypmp42MP4_VIDEO_STREAM"),
+            ("Release_Bundle.zip", ".zip", b"PK\x03\x04ZIP_BUNDLE_BINARY_BYTES"),
+            ("Setup_Tool.exe", ".exe", b"MZ\x90\x00PE_EXECUTABLE_BINARY_HEADER"),
+            ("Floorplan_2026.dwg", ".dwg", b"AC1032_AUTOCAD_DWG_DRAWING_BINARY"),
+            ("Telemetry_Snapshot.amvcustom", ".amvcustom", b"\xde\xad\xbe\xefARBITRARY_CUSTOM_EXTENSION_DATA"),
+        ]
+
+        downloads = self.docs.parent / "Downloads"
+        downloads.mkdir(exist_ok=True)
+
+        client = MockLifecycleClient()
+        cfg = _make_cfg([self.docs, self.desktop, downloads], monitor_removable_storage=False)
+        collector = FilesystemEventCollector(
+            client=client,
+            agent_config=cfg,
+            recycle_bin_roots=[str(self.sim_rb)],
+        )
+        collector.initialize_baseline()
+
+        for fname, ext, initial_bytes in sample_specs:
+            stem = Path(fname).stem
+            # 1. CREATE
+            f_path = self.docs / fname
+            f_path.write_bytes(initial_bytes)
+            await collector.run_once()
+            ev_create = client.posted_events[-1]
+            self.assertEqual(ev_create["event_type"], "CREATED")
+            self.assertEqual(ev_create["file_name"], fname)
+            self.assertEqual(ev_create["file_extension"], ext)
+            self.assertEqual(ev_create["metadata"]["file_size"], len(initial_bytes))
+            self.assertEqual(ev_create["metadata"]["sha256"], hashlib.sha256(initial_bytes).hexdigest())
+            self.assertEqual(ev_create["metadata"]["evidence_status"], "CAPTURED")
+
+            # 2. MODIFY
+            updated_bytes = initial_bytes + b"_REV2_MODIFIED"
+            f_path.write_bytes(updated_bytes)
+            os.utime(f_path, ns=(time.time_ns() + 2_000_000_000, time.time_ns() + 2_000_000_000))
+            await collector.run_once()
+            ev_mod = client.posted_events[-1]
+            self.assertEqual(ev_mod["event_type"], "MODIFIED")
+            self.assertEqual(ev_mod["file_extension"], ext)
+            self.assertEqual(ev_mod["metadata"]["sha256"], hashlib.sha256(updated_bytes).hexdigest())
+            self.assertEqual(ev_mod["metadata"]["evidence_status"], "CAPTURED")
+
+            # 3. RENAME (same folder)
+            renamed_name = f"{stem}_Final{ext}"
+            renamed_path = self.docs / renamed_name
+            f_path.rename(renamed_path)
+            await collector.run_once()
+            ev_ren = client.posted_events[-1]
+            self.assertEqual(ev_ren["event_type"], "RENAMED")
+            self.assertEqual(Path(ev_ren["source_path"]).resolve(), f_path.resolve())
+            self.assertEqual(Path(ev_ren["destination_path"]).resolve(), renamed_path.resolve())
+            self.assertEqual(ev_ren["file_extension"], ext)
+
+            # 4. COPY (Documents -> Desktop)
+            copied_path = self.desktop / renamed_name
+            shutil.copy2(renamed_path, copied_path)
+            await collector.run_once()
+            ev_copy = client.posted_events[-1]
+            self.assertEqual(ev_copy["event_type"], "COPIED")
+            self.assertEqual(Path(ev_copy["source_path"]).resolve(), renamed_path.resolve())
+            self.assertEqual(Path(ev_copy["destination_path"]).resolve(), copied_path.resolve())
+            self.assertEqual(ev_copy["file_extension"], ext)
+            self.assertEqual(ev_copy["metadata"]["sha256"], hashlib.sha256(updated_bytes).hexdigest())
+
+            # 5. MOVE (Desktop -> Downloads)
+            moved_path = downloads / renamed_name
+            copied_path.rename(moved_path)
+            await collector.run_once()
+            ev_move = client.posted_events[-1]
+            self.assertEqual(ev_move["event_type"], "MOVED")
+            self.assertEqual(Path(ev_move["source_path"]).resolve(), copied_path.resolve())
+            self.assertEqual(Path(ev_move["destination_path"]).resolve(), moved_path.resolve())
+            self.assertEqual(ev_move["file_extension"], ext)
+
+            # 6. DELETE (Downloads copy deleted; original in Documents also cleaned up)
+            moved_path.unlink()
+            await collector.run_once()
+            ev_del = client.posted_events[-1]
+            self.assertEqual(ev_del["event_type"], "DELETED")
+            self.assertEqual(Path(ev_del["source_path"]).resolve(), moved_path.resolve())
+            self.assertIsNone(ev_del["destination_path"])
+            self.assertEqual(ev_del["file_extension"], ext)
+            # Content was already archived on MODIFY, so blob remains CAPTURED
+            self.assertEqual(ev_del["metadata"]["evidence_status"], "CAPTURED")
+
+    async def test_11_copy_and_move_local_and_removable_full_metadata_and_direction(self):
+        """Sections 3 & 4: Verify LOCAL<->LOCAL, LOCAL->REMOVABLE, and REMOVABLE->LOCAL COPY & MOVE fields and source/destination ordering."""
+        mounted = [RemovableVolumeInfo(mount_point=str(self.usb_vol), label="AUDIT_USB", filesystem="exFAT")]
+        client = MockLifecycleClient()
+        cfg = _make_cfg([self.docs, self.desktop, self.projects])
+        collector = FilesystemEventCollector(
+            client=client,
+            agent_config=cfg,
+            volume_detector=lambda: list(mounted),
+        )
+
+        # Seed 1 local baseline file and 1 USB baseline file before baseline initialization
+        local_seed = self.docs / "Architecture_Blueprint.dwg"
+        local_bytes = b"AC1032_LOCAL_BLUEPRINT_SEED_DATA_2026"
+        local_sha = hashlib.sha256(local_bytes).hexdigest()
+        local_seed.write_bytes(local_bytes)
+
+        usb_seed = self.usb_vol / "Supplier_Archive.zip"
+        usb_bytes = b"PK\x03\x04USB_SUPPLIER_ARCHIVE_BYTES_2026"
+        usb_sha = hashlib.sha256(usb_bytes).hexdigest()
+        usb_seed.write_bytes(usb_bytes)
+
+        indexed = collector.initialize_baseline()
+        self.assertEqual(indexed, 2)
+        self.assertEqual(len(client.uploaded_files), 0)
+
+        def _assert_full_fields(ev, expected_type, exp_src: Path, exp_dst: Path, exp_ext: str, exp_size: int, exp_sha: str, exp_chan: str):
+            self.assertEqual(ev["event_type"], expected_type)
+            self.assertEqual(ev["file_name"], exp_dst.name)
+            self.assertEqual(ev["file_extension"], exp_ext)
+            self.assertEqual(ev["metadata"]["file_size"], exp_size)
+            self.assertEqual(Path(ev["source_path"]).resolve(), exp_src.resolve())
+            self.assertEqual(Path(ev["destination_path"]).resolve(), exp_dst.resolve())
+            self.assertNotEqual(Path(ev["source_path"]).resolve(), Path(ev["destination_path"]).resolve())
+            self.assertEqual(ev["metadata"]["sha256"], exp_sha)
+            self.assertEqual(ev["endpoint_id"], "dev-lifecycle-001")
+            self.assertTrue(bool(ev["timestamp"]))
+            self.assertEqual(ev["channel"], exp_chan)
+            self.assertEqual(ev["metadata"]["evidence_status"], "CAPTURED")
+
+        # 1. LOCAL -> LOCAL COPY (baseline file Documents -> Desktop)
+        desk_copy = self.desktop / "Architecture_Blueprint.dwg"
+        shutil.copy2(local_seed, desk_copy)
+        await collector.run_once()
+        _assert_full_fields(
+            client.posted_events[-1], "COPIED", local_seed, desk_copy, ".dwg", len(local_bytes), local_sha, LOCAL_CHANNEL_NAME
+        )
+
+        # 2. LOCAL -> REMOVABLE COPY (Desktop -> USB)
+        usb_copy = self.usb_vol / "Architecture_Blueprint.dwg"
+        shutil.copy2(desk_copy, usb_copy)
+        await collector.run_once()
+        _assert_full_fields(
+            client.posted_events[-1], "COPIED", desk_copy, usb_copy, ".dwg", len(local_bytes), local_sha, USB_CHANNEL_NAME
+        )
+        self.assertEqual(client.posted_events[-1]["metadata"]["transfer_direction"], "local_to_removable")
+
+        # 3. REMOVABLE -> LOCAL COPY (USB baseline file -> Projects)
+        proj_from_usb_copy = self.projects / "Supplier_Archive.zip"
+        shutil.copy2(usb_seed, proj_from_usb_copy)
+        await collector.run_once()
+        _assert_full_fields(
+            client.posted_events[-1], "COPIED", usb_seed, proj_from_usb_copy, ".zip", len(usb_bytes), usb_sha, USB_CHANNEL_NAME
+        )
+        self.assertEqual(client.posted_events[-1]["metadata"]["transfer_direction"], "removable_to_local")
+
+        # 4. LOCAL -> LOCAL MOVE (Desktop -> Projects)
+        local_move_src = self.desktop / "Local_Move_Item.pdf"
+        move_bytes = b"%PDF-1.7_LOCAL_TO_LOCAL_MOVE_TEST"
+        move_sha = hashlib.sha256(move_bytes).hexdigest()
+        local_move_src.write_bytes(move_bytes)
+        await collector.run_once()
+
+        local_move_dst = self.projects / "Local_Move_Item.pdf"
+        local_move_src.rename(local_move_dst)
+        await collector.run_once()
+        _assert_full_fields(
+            client.posted_events[-1], "MOVED", local_move_src, local_move_dst, ".pdf", len(move_bytes), move_sha, LOCAL_CHANNEL_NAME
+        )
+
+        # 5. LOCAL -> REMOVABLE MOVE (Projects -> USB via cross-volume copy2 + unlink)
+        usb_move_dst = self.usb_vol / "Local_Move_Item.pdf"
+        shutil.copy2(local_move_dst, usb_move_dst)
+        local_move_dst.unlink()
+        await collector.run_once()
+        _assert_full_fields(
+            client.posted_events[-1], "MOVED", local_move_dst, usb_move_dst, ".pdf", len(move_bytes), move_sha, USB_CHANNEL_NAME
+        )
+        self.assertEqual(client.posted_events[-1]["metadata"]["transfer_direction"], "local_to_removable")
+
+        # 6. REMOVABLE -> LOCAL MOVE (USB -> Documents via cross-volume copy2 + unlink)
+        back_to_local_dst = self.docs / "Local_Move_Item.pdf"
+        shutil.copy2(usb_move_dst, back_to_local_dst)
+        usb_move_dst.unlink()
+        await collector.run_once()
+        _assert_full_fields(
+            client.posted_events[-1], "MOVED", usb_move_dst, back_to_local_dst, ".pdf", len(move_bytes), move_sha, USB_CHANNEL_NAME
+        )
+        self.assertEqual(client.posted_events[-1]["metadata"]["transfer_direction"], "removable_to_local")
+
+    @unittest.skipUnless(os.name == "nt", "Windows Explorer Shell.Application COM requires Windows")
+    async def test_12_windows_explorer_shell_com_copyhere_and_movehere_and_dashboard_api(self):
+        """Sections 7, 9 & Real Explorer: Validate real Windows Shell.Application CopyHere/MoveHere on baseline files and verify /api/dlp/events fields."""
+        import subprocess
+
+        saved_url = global_agent_config.server_url
+        saved_id = global_agent_config.device_id
+        saved_secret = global_agent_config.device_secret
+        saved_dlp = dict(global_agent_config.dlp)
+        real_async_cls = httpx.AsyncClient
+
+        def asgi_factory(*args, **kwargs):
+            kwargs.pop("timeout", None)
+            return real_async_cls(transport=httpx.ASGITransport(app=app), base_url="http://testserver")
+
+        def shell_op(src_file: Path, dst_folder: Path, method: str):
+            ps = (
+                f"$sh = New-Object -ComObject Shell.Application; "
+                f"$f = $sh.NameSpace('{str(dst_folder)}'); "
+                f"if ($null -eq $f) {{ throw 'Namespace null' }}; "
+                f"$f.{method}('{str(src_file)}', 16)"
+            )
+            subprocess.run(["powershell", "-NoProfile", "-Command", ps], check=True, capture_output=True, text=True)
+
+        try:
+            # Pre-existing baseline file before agent starts
+            baseline_doc = self.docs / "Explorer_Baseline_Contract.docx"
+            initial_bytes = b"PK\x03\x04REAL_WINDOWS_EXPLORER_BASELINE_DOCX_2026"
+            initial_sha = hashlib.sha256(initial_bytes).hexdigest()
+            baseline_doc.write_bytes(initial_bytes)
+
+            global_agent_config.server_url = "http://testserver"
+            global_agent_config.device_id = self.enrolled["device_id"]
+            global_agent_config.device_secret = self.enrolled["device_secret"]
+            global_agent_config.dlp = _make_cfg(
+                [self.docs, self.desktop, self.projects],
+                monitor_removable_storage=False,
+            ).dlp
+
+            net_client = AgentNetworkClient()
+            collector = FilesystemEventCollector(
+                client=net_client,
+                agent_config=global_agent_config,
+                recycle_bin_roots=[str(self.sim_rb)],
+            )
+            b_count = collector.initialize_baseline()
+            self.assertEqual(b_count, 1)
+
+            with patch("agent.client.httpx.AsyncClient", side_effect=asgi_factory):
+                # 1. Real Windows Explorer CopyHere (Documents -> Desktop)
+                shell_op(baseline_doc, self.desktop, "CopyHere")
+                await collector.run_once()
+
+                # 2. Real Windows Explorer MoveHere (Desktop -> Projects)
+                desk_copy = self.desktop / "Explorer_Baseline_Contract.docx"
+                shell_op(desk_copy, self.projects, "MoveHere")
+                await collector.run_once()
+
+                # 3. Modify original baseline file in Documents
+                mod_bytes = initial_bytes + b"_AMENDED_CLAUSE"
+                mod_sha = hashlib.sha256(mod_bytes).hexdigest()
+                baseline_doc.write_bytes(mod_bytes)
+                os.utime(baseline_doc, ns=(time.time_ns() + 3_000_000_000, time.time_ns() + 3_000_000_000))
+                await collector.run_once()
+
+                # 4. Permanently delete moved copy in Projects
+                proj_moved = self.projects / "Explorer_Baseline_Contract.docx"
+                proj_moved.unlink()
+                await collector.run_once()
+
+            # Query /api/dlp/events dashboard endpoint and verify exact schema & fields for COPY, MOVE, MODIFY, DELETE
+            res = self.http_client.get(
+                "/api/dlp/events",
+                headers=self.admin_headers,
+                params={"search": "Explorer_Baseline_Contract.docx"},
+            )
+            self.assertEqual(res.status_code, 200)
+            events = list(reversed(res.json()["events"]))
+            self.assertEqual([e["event_type"] for e in events], ["COPIED", "MOVED", "MODIFIED", "DELETED"])
+
+            for ev in events:
+                for req_key in (
+                    "id",
+                    "event_type",
+                    "file_name",
+                    "file_extension",
+                    "file_size",
+                    "source_path",
+                    "destination_path",
+                    "endpoint_id",
+                    "computer_name",
+                    "employee_name",
+                    "channel",
+                    "timestamp",
+                    "evidence_status",
+                    "has_content",
+                    "metadata",
+                ):
+                    self.assertIn(req_key, ev)
+
+            ev_copied, ev_moved, ev_modified, ev_deleted = events
+            self.assertEqual(Path(ev_copied["source_path"]).resolve(), baseline_doc.resolve())
+            self.assertEqual(Path(ev_copied["destination_path"]).resolve(), desk_copy.resolve())
+            self.assertEqual(ev_copied["evidence_status"], "CAPTURED")
+            self.assertTrue(ev_copied["has_content"])
+            self.assertEqual(ev_copied["metadata"]["sha256"], initial_sha)
+
+            self.assertEqual(Path(ev_moved["source_path"]).resolve(), desk_copy.resolve())
+            self.assertEqual(Path(ev_moved["destination_path"]).resolve(), proj_moved.resolve())
+            self.assertEqual(ev_moved["evidence_status"], "CAPTURED")
+            self.assertEqual(ev_moved["metadata"]["sha256"], initial_sha)
+
+            self.assertEqual(Path(ev_modified["source_path"]).resolve(), baseline_doc.resolve())
+            self.assertEqual(ev_modified["evidence_status"], "CAPTURED")
+            self.assertEqual(ev_modified["metadata"]["sha256"], mod_sha)
+
+            self.assertEqual(Path(ev_deleted["source_path"]).resolve(), proj_moved.resolve())
+            self.assertIsNone(ev_deleted["destination_path"])
+            # Content of initial_sha was already archived during COPIED, so DELETED retains CAPTURED evidence!
+            self.assertEqual(ev_deleted["evidence_status"], "CAPTURED")
+            self.assertEqual(ev_deleted["file_blob_id"], ev_copied["file_blob_id"])
+        finally:
+            global_agent_config.server_url = saved_url
+            global_agent_config.device_id = saved_id
+            global_agent_config.device_secret = saved_secret
+            global_agent_config.dlp = saved_dlp
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

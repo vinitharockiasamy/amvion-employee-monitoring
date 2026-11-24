@@ -21,7 +21,7 @@ from server.app.api import auth, agent, admin, websocket, dlp
 app = FastAPI(
     title=settings.PROJECT_NAME,
     description="Enterprise Employee Productivity & DLP Monitoring Console",
-    version="1.2.0",
+    version="1.2.1",
 )
 
 app.add_middleware(

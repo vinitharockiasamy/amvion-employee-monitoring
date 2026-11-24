@@ -7,7 +7,7 @@ import signal
 # Ensure project root is in sys.path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from agent.config import config, BASE_DIR, get_system_metadata
+from agent.config import AGENT_VERSION, config, BASE_DIR, get_system_metadata
 from agent.capture import ScreenCapture
 from agent.compressor import ImageCompressor
 from agent.streamer import LiveStreamer
@@ -123,7 +123,7 @@ clear_zone_identifier()
 def print_banner():
     meta = get_system_metadata()
     print("=" * 65)
-    print("  EMPLOYEE MONITORING SYSTEM — WINDOWS AGENT (MANAGED MVP)")
+    print(f"  EMPLOYEE MONITORING SYSTEM — WINDOWS AGENT v{AGENT_VERSION}")
     print("=" * 65)
     print(f"  Computer Name : {meta['computer_name']}")
     print(f"  Employee Name : {meta['employee_name']}")

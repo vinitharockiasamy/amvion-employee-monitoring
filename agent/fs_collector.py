@@ -1,4 +1,6 @@
 import os
+import stat
+import time
 import ctypes
 import struct
 import string
@@ -46,6 +48,11 @@ IGNORED_DIR_NAMES: Set[str] = {
 }
 
 MAX_HASH_SIZE_BYTES = 512 * 1024 * 1024  # 512 MB safety ceiling for local hashing
+FILE_ATTRIBUTE_REPARSE_POINT = 0x400
+REPARSE_TAGS_TO_SKIP: Set[int] = {
+    getattr(stat, "IO_REPARSE_TAG_MOUNT_POINT", 0xA0000003),
+    getattr(stat, "IO_REPARSE_TAG_SYMLINK", 0xA000000C),
+}
 DRIVE_REMOVABLE = 2
 DRIVE_FIXED = 3
 
@@ -84,6 +91,8 @@ class FileSnapshot:
     mtime_ns: int
     ino: int
     dev: int
+    ctime_ns: int = 0
+    seen_seq: int = 0
     sha256: Optional[str] = None
     blob_id: Optional[str] = None
     removable_root_key: Optional[str] = None
@@ -530,6 +539,8 @@ class FilesystemEventCollector:
         self._snapshot: Dict[str, FileSnapshot] = {}
         self._uploaded_blobs: Dict[str, str] = {}  # sha256 -> file_blob_id
         self._active_removable_volumes: Dict[str, RemovableVolumeInfo] = {}  # normalized_key -> info
+        self._deferred_new_files: Dict[str, int] = {}  # norm_key -> deferral count for locked mid-copy files
+        self._seen_counter: int = 0
 
         max_q = int(self.config.dlp.get("max_queue_size", 500) or 500)
         self._retry_queue: deque = deque(maxlen=max(1, max_q))
@@ -658,24 +669,51 @@ class FilesystemEventCollector:
     ):
         if depth > self.max_depth:
             return
+        dir_id: Optional[Tuple[int, int]] = None
         try:
             dir_stat = os.stat(directory)
             if dir_stat.st_ino:
                 dir_id = (dir_stat.st_dev, dir_stat.st_ino)
                 if dir_id in visited_dirs:
                     return
-                visited_dirs.add(dir_id)
         except OSError:
             return
 
         try:
             with os.scandir(directory) as it:
+                # Only mark directory visited once scandir succeeds so unreadable NTFS compatibility
+                # junctions (e.g. Documents\My Pictures in Python 3.11) never poison visited_dirs!
+                if dir_id is not None:
+                    visited_dirs.add(dir_id)
                 for entry in it:
                     try:
                         entry_name_lower = entry.name.lower()
+                        if entry.is_symlink():
+                            continue
+                        try:
+                            entry_lstat = entry.stat(follow_symlinks=False)
+                        except OSError:
+                            entry_lstat = None
+
+                        if entry_lstat is not None:
+                            reparse_tag = getattr(entry_lstat, "st_reparse_tag", 0)
+                            if reparse_tag in REPARSE_TAGS_TO_SKIP:
+                                continue
+
                         if entry.is_dir(follow_symlinks=False):
                             if entry_name_lower in IGNORED_DIR_NAMES or entry_name_lower.startswith("."):
                                 continue
+                            # Guard Python 3.11 Windows junction edge case where st_reparse_tag may be 0
+                            # on DirEntry.stat() unless os.lstat is checked when FILE_ATTRIBUTE_REPARSE_POINT is set
+                            if entry_lstat is not None and (
+                                getattr(entry_lstat, "st_file_attributes", 0) & FILE_ATTRIBUTE_REPARSE_POINT
+                            ):
+                                try:
+                                    l_st = os.lstat(entry.path)
+                                    if getattr(l_st, "st_reparse_tag", 0) in REPARSE_TAGS_TO_SKIP:
+                                        continue
+                                except OSError:
+                                    continue
                             self._walk_dir(
                                 Path(entry.path),
                                 depth + 1,
@@ -690,7 +728,7 @@ class FilesystemEventCollector:
                             try:
                                 st = os.stat(entry.path, follow_symlinks=False)
                             except OSError:
-                                st = entry.stat(follow_symlinks=False)
+                                st = entry_lstat or entry.stat(follow_symlinks=False)
                             full_path = os.path.abspath(entry.path)
                             norm_key = os.path.normcase(full_path)
                             out[norm_key] = FileSnapshot(
@@ -702,6 +740,7 @@ class FilesystemEventCollector:
                                 mtime_ns=st.st_mtime_ns,
                                 ino=st.st_ino,
                                 dev=st.st_dev,
+                                ctime_ns=getattr(st, "st_ctime_ns", 0),
                                 removable_root_key=removable_root_key,
                             )
                     except (PermissionError, FileNotFoundError, OSError):
@@ -731,6 +770,7 @@ class FilesystemEventCollector:
         for snap in entries.values():
             snap.is_baseline = True
             snap.baseline_timestamp = baseline_ts
+            snap.seen_seq = 0
             if 0 < snap.size <= hash_max_bytes and snap.sha256 is None:
                 sha, _, err = compute_file_sha256(snap.path, max_bytes=hash_max_bytes)
                 if sha and not err:
@@ -840,6 +880,38 @@ class FilesystemEventCollector:
             "attempts": 0,
         })
 
+    def _reconcile_split_move_candidates(
+        self,
+        current_map: Dict[str, FileSnapshot],
+        common_keys: Set[str],
+        appeared_keys: Set[str],
+        disappeared_keys: Set[str],
+    ):
+        """
+        Guard B: If a source folder was scanned moments BEFORE an Explorer Cut/Move and the destination
+        folder was scanned moments AFTER the Paste within the same scan pass, both paths momentarily
+        appear in current_map with the same (dev, ino). Re-check disk existence on the old path so
+        same-volume MOVED is paired atomically instead of falsely emitting COPIED + DELETED.
+        """
+        if not appeared_keys or not common_keys:
+            return
+        common_by_ino: Dict[Tuple[int, int], List[str]] = {}
+        for ck in common_keys:
+            cs = current_map[ck]
+            if cs.ino > 0:
+                common_by_ino.setdefault((cs.dev, cs.ino), []).append(ck)
+
+        for nk in list(appeared_keys):
+            ns = current_map.get(nk)
+            if not ns or ns.ino <= 0:
+                continue
+            for cand_k in common_by_ino.get((ns.dev, ns.ino), []):
+                cand_snap = current_map.get(cand_k)
+                if cand_snap and not os.path.exists(cand_snap.path):
+                    current_map.pop(cand_k, None)
+                    common_keys.discard(cand_k)
+                    disappeared_keys.add(cand_k)
+
     def collect_changes(self) -> List[DetectedFileChange]:
         """
         Compare current filesystem + removable volume state against previous snapshot and return
@@ -849,11 +921,14 @@ class FilesystemEventCollector:
             self.initialize_baseline()
             return []
 
+        dlp_cfg = self.config.dlp or {}
+        debug_diag = bool(dlp_cfg.get("debug_diagnostics", False))
+
         current_map, unreachable_rem_keys = self._scan_directory_tree()
         prev_map = dict(self._snapshot)
 
-        if unreachable_rem_keys:
-            for rem_key in unreachable_rem_keys:
+        def _purge_unreachable(rem_keys: Set[str]):
+            for rem_key in rem_keys:
                 self._active_removable_volumes.pop(rem_key, None)
                 for k in [
                     pk for pk, ps in prev_map.items()
@@ -861,12 +936,32 @@ class FilesystemEventCollector:
                 ]:
                     prev_map.pop(k, None)
 
+        if unreachable_rem_keys:
+            _purge_unreachable(unreachable_rem_keys)
+
         prev_keys = set(prev_map.keys())
         curr_keys = set(current_map.keys())
 
         disappeared_keys = prev_keys - curr_keys
         appeared_keys = curr_keys - prev_keys
         common_keys = prev_keys & curr_keys
+
+        self._reconcile_split_move_candidates(current_map, common_keys, appeared_keys, disappeared_keys)
+
+        # Guard A: If a file disappeared during this scan pass with no newly-appeared counterpart yet
+        # (e.g. destination root was scanned just before Explorer finished Cut -> Paste), wait briefly
+        # and re-scan once so mid-flight Explorer moves coalesce cleanly into MOVED instead of DELETED + CREATED.
+        if disappeared_keys and not appeared_keys:
+            time.sleep(0.12)
+            current_map, unreachable_rem_keys2 = self._scan_directory_tree()
+            if unreachable_rem_keys2:
+                _purge_unreachable(unreachable_rem_keys2)
+                prev_keys = set(prev_map.keys())
+            curr_keys = set(current_map.keys())
+            disappeared_keys = prev_keys - curr_keys
+            appeared_keys = curr_keys - prev_keys
+            common_keys = prev_keys & curr_keys
+            self._reconcile_split_move_candidates(current_map, common_keys, appeared_keys, disappeared_keys)
 
         changes: List[DetectedFileChange] = []
 
@@ -896,16 +991,25 @@ class FilesystemEventCollector:
 
                 matched_old.add(old_k)
                 matched_new.add(new_k)
+                self._deferred_new_files.pop(new_k, None)
 
                 if old_snap.size == new_snap.size and old_snap.mtime_ns == new_snap.mtime_ns:
                     new_snap.sha256 = old_snap.sha256
                     new_snap.blob_id = old_snap.blob_id
                 new_snap.is_baseline = old_snap.is_baseline
                 new_snap.baseline_timestamp = old_snap.baseline_timestamp
+                self._seen_counter += 1
+                new_snap.seen_seq = self._seen_counter
 
                 old_parent = os.path.normcase(os.path.dirname(old_snap.path))
                 new_parent = os.path.normcase(os.path.dirname(new_snap.path))
                 ev_type = "RENAMED" if old_parent == new_parent else "MOVED"
+
+                if debug_diag:
+                    print(
+                        f"[DLP-DIAG] INODE_MATCH -> {ev_type} | src={old_snap.path} | dst={new_snap.path} "
+                        f"| dev_ino={file_id} | size={new_snap.size} | sha256={new_snap.sha256}"
+                    )
 
                 changes.append(DetectedFileChange(
                     event_type=ev_type,
@@ -923,6 +1027,67 @@ class FilesystemEventCollector:
 
         remaining_disappeared = disappeared_keys - matched_old
         remaining_appeared = appeared_keys - matched_new
+
+        # In-flight Windows Explorer copy/write lock deferral:
+        # When Explorer copies a file (or performs a cross-volume Cut+Paste), it creates the destination
+        # file and holds a write handle while streaming bytes. If a newly appeared file is currently locked
+        # or still growing, defer it for up to 2 cycles so SHA-256 correlation sees the settled file.
+        for new_k in list(remaining_appeared):
+            ns = current_map.get(new_k)
+            if ns is None:
+                continue
+            defer_reason: Optional[str] = None
+            try:
+                st_now = os.stat(ns.path, follow_symlinks=False)
+                if st_now.st_size != ns.size or st_now.st_mtime_ns != ns.mtime_ns:
+                    defer_reason = f"size/mtime still changing ({ns.size} -> {st_now.st_size})"
+                elif ns.size == 0:
+                    # Verify 0-byte file isn't held under an exclusive write share-lock
+                    try:
+                        with open(ns.path, "rb"):
+                            pass
+                        ns.sha256 = hashlib.sha256(b"").hexdigest()
+                    except PermissionError as pe:
+                        defer_reason = f"0-byte file locked ({pe})"
+                elif 0 < ns.size <= MAX_HASH_SIZE_BYTES and not ns.sha256:
+                    sha_val, read_sz, h_err = compute_file_sha256(ns.path)
+                    if h_err and ("PermissionError" in h_err or "WinError 32" in h_err):
+                        defer_reason = h_err
+                    elif sha_val and not h_err:
+                        if read_sz != ns.size:
+                            defer_reason = f"partial read ({read_sz} != {ns.size})"
+                        else:
+                            ns.sha256 = sha_val
+            except FileNotFoundError:
+                # Transient Explorer temp/staging file vanished before classification
+                remaining_appeared.discard(new_k)
+                current_map.pop(new_k, None)
+                self._deferred_new_files.pop(new_k, None)
+                continue
+            except PermissionError as pe:
+                defer_reason = str(pe)
+            except OSError:
+                pass
+
+            if defer_reason:
+                attempts = self._deferred_new_files.get(new_k, 0)
+                if attempts < 2:
+                    self._deferred_new_files[new_k] = attempts + 1
+                    remaining_appeared.discard(new_k)
+                    current_map.pop(new_k, None)
+                    if debug_diag:
+                        print(
+                            f"[DLP-DIAG] DEFERRED_IN_FLIGHT (attempt {attempts + 1}/2) | path={ns.path} "
+                            f"| reason={defer_reason}"
+                        )
+                    continue
+            self._deferred_new_files.pop(new_k, None)
+
+        # Clean up stale deferral counters for keys no longer pending
+        for dk in list(self._deferred_new_files.keys()):
+            if dk in current_map or not os.path.exists(dk):
+                if dk in current_map:
+                    self._deferred_new_files.pop(dk, None)
 
         # 2. Cross-volume / copy+unlink MOVED detection (Local <-> Local across partitions OR Local <-> USB)
         # Pair ONLY when unambiguous 1-to-1 match by exact (size + SHA-256) OR cross-volume (filename + size + preserved mtime).
@@ -962,10 +1127,18 @@ class FilesystemEventCollector:
                         new_snap.blob_id = old_snap.blob_id
                         new_snap.is_baseline = old_snap.is_baseline
                         new_snap.baseline_timestamp = old_snap.baseline_timestamp
+                        self._seen_counter += 1
+                        new_snap.seen_seq = self._seen_counter
 
                         old_parent = os.path.normcase(os.path.dirname(old_snap.path))
                         new_parent = os.path.normcase(os.path.dirname(new_snap.path))
                         ev_type = "RENAMED" if old_parent == new_parent else "MOVED"
+
+                        if debug_diag:
+                            print(
+                                f"[DLP-DIAG] SHA_MOVE_MATCH -> {ev_type} | src={old_snap.path} | dst={new_snap.path} "
+                                f"| size={new_snap.size} | sha256={new_snap.sha256}"
+                            )
 
                         changes.append(DetectedFileChange(
                             event_type=ev_type,
@@ -1008,6 +1181,8 @@ class FilesystemEventCollector:
                         if different_volume and abs(old_snap.mtime_ns - new_snap.mtime_ns) <= 2_100_000_000:
                             remaining_disappeared.discard(ok_list[0])
                             remaining_appeared.discard(nk_list[0])
+                            self._seen_counter += 1
+                            new_snap.seen_seq = self._seen_counter
                             changes.append(DetectedFileChange(
                                 event_type="MOVED",
                                 file_name=new_snap.name,
@@ -1026,6 +1201,7 @@ class FilesystemEventCollector:
             curr_snap = current_map[k]
             curr_snap.is_baseline = old_snap.is_baseline
             curr_snap.baseline_timestamp = old_snap.baseline_timestamp
+            curr_snap.seen_seq = old_snap.seen_seq
 
             if old_snap.name != curr_snap.name:
                 changes.append(DetectedFileChange(
@@ -1043,6 +1219,8 @@ class FilesystemEventCollector:
                 ))
 
             if old_snap.size != curr_snap.size or old_snap.mtime_ns != curr_snap.mtime_ns:
+                self._seen_counter += 1
+                curr_snap.seen_seq = self._seen_counter
                 changes.append(DetectedFileChange(
                     event_type="MODIFIED",
                     file_name=curr_snap.name,
@@ -1063,6 +1241,8 @@ class FilesystemEventCollector:
         pre_existing_pool_keys = common_keys | matched_new
         for new_k in sorted(remaining_appeared):
             new_snap = current_map[new_k]
+            self._seen_counter += 1
+            new_snap.seen_seq = self._seen_counter
             matched_copy_source: Optional[FileSnapshot] = None
 
             if new_snap.size > 0:
@@ -1073,7 +1253,13 @@ class FilesystemEventCollector:
                     and k_cand != new_k
                     and current_map[k_cand].size == new_snap.size
                 ]
-                if 1 <= len(size_candidates) <= 15:
+                if debug_diag:
+                    print(
+                        f"[DLP-DIAG] RAW_APPEARED | path={new_snap.path} | size={new_snap.size} "
+                        f"| dev_ino=({new_snap.dev},{new_snap.ino}) | sha256={new_snap.sha256} "
+                        f"| size_candidates={[c.path for c in size_candidates]}"
+                    )
+                if 1 <= len(size_candidates) <= 25:
                     new_sha = new_snap.sha256
                     if not new_sha:
                         new_sha, _, err = compute_file_sha256(new_snap.path)
@@ -1093,24 +1279,49 @@ class FilesystemEventCollector:
                         if len(sha_matches) == 1:
                             matched_copy_source = sha_matches[0]
                         elif len(sha_matches) > 1:
-                            # Disambiguate multi-hop chains (e.g. Docs -> Desktop, then Desktop -> USB):
-                            # 1) Prefer exact filename match if unique
+                            # Disambiguate multi-hop Explorer chains (e.g. Docs -> Desktop -> Downloads -> USB):
+                            # Windows Explorer Copy/Paste preserves LastWriteTime (mtime_ns) on every hop,
+                            # so we rank same-filename copies by (seen_seq, ctime_ns, mtime_ns) to pick the
+                            # most recently materialized hop while refusing to guess on unrelated filenames!
                             same_name = [
                                 c for c in sha_matches
                                 if os.path.normcase(c.name) == os.path.normcase(new_snap.name)
                             ]
-                            pool = same_name if same_name else sha_matches
-                            if len(pool) == 1:
-                                matched_copy_source = pool[0]
-                            elif len(pool) > 1:
-                                # 2) If copying onto USB, check if unique most-recently-written source exists
-                                sorted_by_mtime = sorted(pool, key=lambda c: c.mtime_ns, reverse=True)
-                                if sorted_by_mtime[0].mtime_ns > sorted_by_mtime[1].mtime_ns:
-                                    matched_copy_source = sorted_by_mtime[0]
+                            if len(same_name) == 1:
+                                matched_copy_source = same_name[0]
+                            elif len(same_name) > 1:
+                                def _hop_rank(c: FileSnapshot) -> Tuple[int, int, int]:
+                                    return (c.seen_seq, c.ctime_ns, c.mtime_ns)
+
+                                ranked_same = sorted(same_name, key=_hop_rank, reverse=True)
+                                if _hop_rank(ranked_same[0]) > _hop_rank(ranked_same[1]):
+                                    matched_copy_source = ranked_same[0]
+                            else:
+                                # Check Windows Explorer same-folder duplicate pattern ("<stem> - Copy<ext>")
+                                new_parent = os.path.normcase(os.path.dirname(new_snap.path))
+                                new_stem = os.path.normcase(Path(new_snap.name).stem)
+                                explorer_dup_cands = [
+                                    c for c in sha_matches
+                                    if os.path.normcase(os.path.dirname(c.path)) == new_parent
+                                    and new_stem.startswith(os.path.normcase(Path(c.name).stem) + " - copy")
+                                ]
+                                if len(explorer_dup_cands) == 1:
+                                    matched_copy_source = explorer_dup_cands[0]
+                                else:
+                                    # Different filename across folders with multiple identical SHA-256 copies:
+                                    # only correlate if a single candidate has a strictly newer mtime_ns.
+                                    sorted_by_mtime = sorted(sha_matches, key=lambda c: c.mtime_ns, reverse=True)
+                                    if sorted_by_mtime[0].mtime_ns > sorted_by_mtime[1].mtime_ns:
+                                        matched_copy_source = sorted_by_mtime[0]
 
             if matched_copy_source is not None:
                 if matched_copy_source.blob_id and not new_snap.blob_id:
                     new_snap.blob_id = matched_copy_source.blob_id
+                if debug_diag:
+                    print(
+                        f"[DLP-DIAG] CLASSIFIED -> COPIED | src={matched_copy_source.path} "
+                        f"| dst={new_snap.path} | sha256={new_snap.sha256}"
+                    )
                 changes.append(DetectedFileChange(
                     event_type="COPIED",
                     file_name=new_snap.name,
@@ -1126,6 +1337,11 @@ class FilesystemEventCollector:
                 # Add newly confirmed file to pool so sequential copies in one cycle can chain cleanly
                 pre_existing_pool_keys.add(new_k)
             else:
+                if debug_diag:
+                    print(
+                        f"[DLP-DIAG] CLASSIFIED -> CREATED | dst={new_snap.path} "
+                        f"| size={new_snap.size} | sha256={new_snap.sha256}"
+                    )
                 changes.append(DetectedFileChange(
                     event_type="CREATED",
                     file_name=new_snap.name,
@@ -1144,6 +1360,11 @@ class FilesystemEventCollector:
             old_snap = prev_map[old_k]
             # Level 1 opportunistic check: if still accessible right now (e.g. pending handle), allow reading
             still_accessible_path = old_snap.path if os.path.isfile(old_snap.path) else None
+            if debug_diag:
+                print(
+                    f"[DLP-DIAG] CLASSIFIED -> DELETED | src={old_snap.path} "
+                    f"| size={old_snap.size} | sha256={old_snap.sha256}"
+                )
             changes.append(DetectedFileChange(
                 event_type="DELETED",
                 file_name=old_snap.name,
@@ -1353,6 +1574,11 @@ class FilesystemEventCollector:
             "success_evidence_status": deferred_status_on_success,
             "attempts": 0,
         }
+
+        print(
+            f"[DLP] {change.event_type}: file={change.file_name} | src={change.source_path} "
+            f"| dst={effective_destination} | size={actual_size} | channel={channel} | status={evidence_status}"
+        )
 
         if needs_deferred_evidence:
             self._retry_queue.append(queue_item)
