@@ -2,6 +2,7 @@
 
 An enterprise-grade desktop screen monitoring and situational awareness platform built with **FastAPI**, **WebSockets**, **SQLite**, and a **Signed Windows Installer (`.msi`) Agent**.
 
+🌐 **Live 24/7 Cloud Admin Dashboard:** [https://em-productivity-system.onrender.com](https://em-productivity-system.onrender.com)  
 ⬇️ **Windows MSI Installer (`EMP-SA-enterprise-1.0.0.msi`):** [Download EMP-SA-enterprise-1.0.0.msi](https://github.com/vinitharockiasamy/employee-monitoring-system/raw/main/EMP-SA-enterprise-1.0.0.msi)
 
 ---

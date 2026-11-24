@@ -3,7 +3,6 @@ import json
 import uuid
 import socket
 import platform
-import base64
 import sys
 import httpx
 from pathlib import Path
@@ -16,7 +15,7 @@ else:
 CONFIG_FILE = BASE_DIR / "agent_state.json"
 SERVER_URL_FILE = BASE_DIR / "server_url.txt"
 DISCOVERY_TOPIC = "emp-monitor-vinith-2026"
-DEFAULT_PUBLIC_URL = base64.b64decode("aHR0cHM6Ly9hbXZpb24tZW1wbG95ZWUtbW9uaXRvcmluZy5vbnJlbmRlci5jb20=").decode("utf-8")
+DEFAULT_PUBLIC_URL = "https://em-productivity-system.onrender.com"
 
 def get_hardware_uuid() -> str:
     """Extract Windows MachineGuid from Registry or generate deterministic fallback."""
