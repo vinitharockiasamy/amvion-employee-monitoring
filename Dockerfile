@@ -6,9 +6,9 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir fastapi uvicorn[standard] sqlalchemy jinja2 python-multipart aiofiles websockets httpx pydantic
 
-# Copy application code and standalone Windows installer folder
+# Copy application code and signed Windows installer package
 COPY server ./server
-COPY installer ./installer
+COPY EmployeeMonitoringAgent-Setup.zip ./EmployeeMonitoringAgent-Setup.zip
 COPY run_server.py .
 
 EXPOSE 8000

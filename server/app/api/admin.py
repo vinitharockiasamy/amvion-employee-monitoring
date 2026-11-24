@@ -155,13 +155,17 @@ def download_agent_zip(request: Request):
     zip_path = project_root / "EmployeeMonitoringAgent-Setup.zip"
 
     active_url = _resolve_active_public_url(request)
-    if active_url and installer_dir.exists():
+    if installer_dir.exists() and not zip_path.exists():
         try:
-            (installer_dir / "server_url.txt").write_text(active_url + "\n", encoding="utf-8")
+            if active_url:
+                (installer_dir / "server_url.txt").write_text(active_url + "\n", encoding="utf-8")
+                if (installer_dir / "agent").exists():
+                    (installer_dir / "agent" / "server_url.txt").write_text(active_url + "\n", encoding="utf-8")
             with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-                for file_p in installer_dir.iterdir():
+                for file_p in installer_dir.rglob("*"):
                     if file_p.is_file():
-                        zf.write(file_p, arcname=file_p.name)
+                        rel_name = file_p.relative_to(installer_dir).as_posix()
+                        zf.write(file_p, arcname=rel_name)
         except Exception as e:
             print(f"[Admin] Dynamic zip build notice: {e}")
 

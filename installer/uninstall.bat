@@ -10,6 +10,8 @@ set "INSTALL_DIR=%LOCALAPPDATA%\Amvion\EmployeeMonitoringAgent"
 
 echo [1/4] Terminating background agent process...
 taskkill /F /IM EmployeeMonitoringAgent.exe >nul 2>&1
+wmic process where "name='pythonw.exe' and commandline like '%%Amvion%%'" delete >nul 2>&1
+powershell -NoProfile -Command "Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*Amvion*main.py*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }" >nul 2>&1
 
 echo [2/4] Removing Windows Task Scheduler auto-start entry...
 schtasks /Delete /TN "AmvionMonitoringAgent" /F >nul 2>&1

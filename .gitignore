@@ -9,4 +9,4 @@ server/monitoring.db
 server/storage/screenshots/*
 agent/agent_state.json
 cloudflared.exe
-EmployeeMonitoringAgent-Setup.zip
+installer/runtime/
