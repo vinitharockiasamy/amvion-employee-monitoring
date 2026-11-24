@@ -94,4 +94,12 @@ if __name__ == "__main__":
         t = threading.Thread(target=tunnel_guardian_loop, daemon=True)
         t.start()
     port = int(os.getenv("PORT", "8000"))
-    uvicorn.run("server.app.main:app", host="0.0.0.0", port=port, reload=False, log_config=None)
+    uvicorn.run(
+        "server.app.main:app",
+        host="0.0.0.0",
+        port=port,
+        reload=False,
+        proxy_headers=True,
+        forwarded_allow_ips="*",
+        log_config=None,
+    )

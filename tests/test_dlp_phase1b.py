@@ -106,7 +106,14 @@ class TestDlpPhase1B(unittest.TestCase):
         cls.temp_dir.cleanup()
 
     def test_01_dashboard_renders_dlp_tab_and_preview_modal(self):
-        res = self.client.get("/")
+        # Unauthenticated root renders login gate without exposing dashboard
+        unauth = self.client.get("/")
+        self.assertEqual(unauth.status_code, 200)
+        self.assertIn("Enterprise Admin Console", unauth.text)
+        self.assertNotIn("dlpEventsTableBody", unauth.text)
+
+        # Authenticated root renders full dashboard with DLP tab and preview modal
+        res = self.client.get("/", headers=self.admin_headers)
         self.assertEqual(res.status_code, 200)
         html = res.text
         self.assertIn("DLP Audit & File Viewer", html)

@@ -42,9 +42,19 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 });
 
+async function logoutAdmin() {
+    try {
+        await fetch('/api/v1/auth/admin/logout', { method: 'POST' });
+    } catch (e) {
+        // ignore
+    }
+    window.location.href = '/';
+}
+
 async function fetchPublicUrl() {
     try {
-        const res = await fetch('/api/v1/admin/public-url');
+        const res = await fetch('/api/v1/admin/public-url', { headers: getAdminHeaders() });
+        if (!res.ok) return;
         const data = await res.json();
         if (data.public_url) {
             const badge = document.getElementById('publicUrlBadge');
@@ -64,7 +74,14 @@ async function fetchPublicUrl() {
 async function deleteDevice(event, deviceId, computerName) {
     event.stopPropagation();
     try {
-        const res = await fetch(`/api/v1/admin/devices/${deviceId}`, { method: 'DELETE' });
+        const res = await fetch(`/api/v1/admin/devices/${deviceId}`, {
+            method: 'DELETE',
+            headers: getAdminHeaders()
+        });
+        if (res.status === 401) {
+            window.location.href = '/';
+            return;
+        }
         if (res.ok) {
             devicesMap.delete(deviceId);
             updateStats();
@@ -78,11 +95,16 @@ async function deleteDevice(event, deviceId, computerName) {
 // Fetch devices list from REST API
 async function fetchDevices() {
     try {
-        const res = await fetch('/api/v1/admin/devices');
+        const res = await fetch('/api/v1/admin/devices', { headers: getAdminHeaders() });
+        if (res.status === 401) {
+            window.location.href = '/';
+            return;
+        }
+        if (!res.ok) return;
         const data = await res.json();
         
         devicesMap.clear();
-        data.devices.forEach(d => devicesMap.set(d.device_id, d));
+        (data.devices || []).forEach(d => devicesMap.set(d.device_id, d));
         
         updateStats();
         populateDlpDeviceDropdown();
@@ -95,7 +117,9 @@ async function fetchDevices() {
 // WebSocket Connection & Event Handler
 function connectWebSocket() {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${protocol}//${window.location.host}/ws/dashboard`;
+    const tok = window.ADMIN_AUTH_TOKEN || '';
+    const qs = tok ? `?token=${encodeURIComponent(tok)}` : '';
+    const wsUrl = `${protocol}//${window.location.host}/ws/dashboard${qs}`;
 
     ws = new WebSocket(wsUrl);
 
@@ -350,7 +374,7 @@ function renderScreenWall() {
             : 'bg-slate-700/60 text-slate-400 border-slate-600';
 
         const screenshotSrc = dev.latest_screenshot_url 
-            ? dev.latest_screenshot_url 
+            ? appendAdminTokenQuery(dev.latest_screenshot_url)
             : 'data:image/svg+xml;charset=UTF-8,%3Csvg%20width%3D%22400%22%20height%3D%22225%22%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%3E%3Crect%20width%3D%22100%25%22%20height%3D%22100%25%22%20fill%3D%22%231e293b%22%2F%3E%3Ctext%20x%3D%2250%25%22%20y%3D%2250%25%22%20fill%3D%22%2364748b%22%20font-size%3D%2214%22%20text-anchor%3D%22middle%22%20dy%3D%22.3em%22%3ENo%20Screenshot%20Yet%3C%2Ftext%3E%3C%2Fsvg%3E';
 
         const lastSeenText = formatRelativeTime(dev.last_seen_at);
@@ -412,11 +436,12 @@ function renderScreenWall() {
 
 // Fast partial tile update for incoming screenshot without DOM rebuild
 function updateTileImage(deviceId, screenshotUrl, lastSeen) {
+    const authScreenshotUrl = appendAdminTokenQuery(screenshotUrl);
     const imgEl = document.getElementById(`img-${deviceId}`);
     const timeEl = document.getElementById(`time-${deviceId}`);
     
     if (imgEl) {
-        imgEl.src = screenshotUrl;
+        imgEl.src = authScreenshotUrl;
         imgEl.classList.remove('opacity-40', 'grayscale');
     }
     if (timeEl) {
@@ -428,7 +453,7 @@ function updateTileImage(deviceId, screenshotUrl, lastSeen) {
         const loadingOverlay = document.getElementById('streamLoadingOverlay');
         const hudTimestamp = document.getElementById('hudTimestamp');
         if (loadingOverlay) loadingOverlay.classList.add('hidden');
-        if (detailImg) detailImg.src = screenshotUrl;
+        if (detailImg) detailImg.src = authScreenshotUrl;
         if (hudTimestamp) hudTimestamp.textContent = new Date().toLocaleTimeString();
         frameCount++;
     }
@@ -459,7 +484,7 @@ function openDetailModal(deviceId) {
     // Show live screen immediately without dark blocking overlay
     if (detailImg) {
         detailImg.classList.remove('hidden');
-        detailImg.src = dev.latest_screenshot_url || '';
+        detailImg.src = dev.latest_screenshot_url ? appendAdminTokenQuery(dev.latest_screenshot_url) : '';
     }
     if (video) {
         video.classList.add('hidden');

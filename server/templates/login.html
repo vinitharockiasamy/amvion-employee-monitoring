@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en" class="h-full bg-slate-950">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Administrator Sign In — Employee Monitoring System</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+</head>
+<body class="h-full flex items-center justify-center p-4 font-['Inter',sans-serif] text-slate-100 bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950">
+    <div class="w-full max-w-md bg-slate-900/90 border border-slate-800 rounded-2xl shadow-2xl p-8">
+        <div class="flex items-center space-x-3 mb-6">
+            <div class="w-10 h-10 rounded-xl bg-emerald-500/20 border border-emerald-500/40 flex items-center justify-center">
+                <svg class="w-5 h-5 text-emerald-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"></path>
+                </svg>
+            </div>
+            <div>
+                <h1 class="text-lg font-bold text-white tracking-tight">Enterprise Admin Console</h1>
+                <p class="text-xs text-slate-400">Live Screen Wall & DLP Audit Vault</p>
+            </div>
+        </div>
+
+        <div id="loginError" class="hidden mb-4 px-3.5 py-2.5 rounded-xl bg-rose-500/15 border border-rose-500/40 text-xs text-rose-300 font-medium"></div>
+
+        <form id="loginForm" class="space-y-4">
+            <div>
+                <label for="username" class="block text-xs font-semibold text-slate-300 uppercase tracking-wider mb-1.5">Username</label>
+                <input id="username" name="username" type="text" required autocomplete="username"
+                       placeholder="Enter administrator username"
+                       class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-700 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500 transition">
+            </div>
+
+            <div>
+                <label for="password" class="block text-xs font-semibold text-slate-300 uppercase tracking-wider mb-1.5">Password</label>
+                <input id="password" name="password" type="password" required autocomplete="current-password"
+                       placeholder="••••••••••••"
+                       class="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-700 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500 transition">
+            </div>
+
+            <button id="submitBtn" type="submit"
+                    class="w-full py-2.5 px-4 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-semibold text-sm transition shadow-lg shadow-emerald-500/10">
+                Sign In to Console
+            </button>
+        </form>
+
+        <p class="mt-6 text-center text-[11px] text-slate-500">
+            Authorized Enterprise Personnel Only • Encrypted Session
+        </p>
+    </div>
+
+    <script>
+        const form = document.getElementById('loginForm');
+        const errEl = document.getElementById('loginError');
+        const btn = document.getElementById('submitBtn');
+
+        form.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            errEl.classList.add('hidden');
+            btn.disabled = true;
+            btn.textContent = 'Authenticating...';
+
+            try {
+                const res = await fetch('/api/v1/auth/admin/login', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        username: document.getElementById('username').value.trim(),
+                        password: document.getElementById('password').value
+                    })
+                });
+                const data = await res.json().catch(() => ({}));
+                if (!res.ok) {
+                    throw new Error(data.detail || 'Authentication failed');
+                }
+                window.location.href = '/';
+            } catch (err) {
+                errEl.textContent = err.message;
+                errEl.classList.remove('hidden');
+                btn.disabled = false;
+                btn.textContent = 'Sign In to Console';
+            }
+        });
+    </script>
+</body>
+</html>

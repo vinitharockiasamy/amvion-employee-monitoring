@@ -5,7 +5,7 @@ from typing import Dict, Set, Optional
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query, status
 from server.app.db.session import SessionLocal
 from server.app.db.models import Device
-from server.app.core.security import verify_admin_ws_token
+from server.app.core.security import verify_admin_ws_request, verify_admin_ws_token
 
 router = APIRouter(tags=["WebSockets"])
 
@@ -195,7 +195,14 @@ async def agent_websocket_endpoint(websocket: WebSocket, device_id: str):
         await manager.disconnect_agent(device_id)
 
 @router.websocket("/ws/dashboard")
-async def dashboard_websocket_endpoint(websocket: WebSocket):
+async def dashboard_websocket_endpoint(
+    websocket: WebSocket,
+    token: Optional[str] = Query(None)
+):
+    if not verify_admin_ws_request(websocket, token):
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        return
+
     await manager.connect_dashboard(websocket)
     try:
         while True:
@@ -231,13 +238,7 @@ async def dlp_admin_websocket_endpoint(
     token: Optional[str] = Query(None)
 ):
     """Authenticated WebSocket feed for administrator DLP event notifications."""
-    header_token = websocket.headers.get("x-admin-token")
-    auth_header = websocket.headers.get("authorization", "")
-    if not header_token and auth_header.startswith("Bearer "):
-        header_token = auth_header.split("Bearer ", 1)[1].strip()
-
-    effective_token = token or header_token
-    if not verify_admin_ws_token(effective_token):
+    if not verify_admin_ws_request(websocket, token):
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return
 
