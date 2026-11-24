@@ -238,7 +238,7 @@ class TestDlpPhase1CUnit(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(client.uploaded_files), 1)
         self.assertEqual(client.uploaded_files[0]["original_filename"], "ring_cad.3dm")
         self.assertEqual(client.posted_events[0]["file_blob_id"], client.uploaded_files[0]["blob_id"])
-        self.assertEqual(client.posted_events[0]["metadata"]["evidence_status"], "archived")
+        self.assertEqual(client.posted_events[0]["metadata"]["evidence_status"], "CAPTURED")
 
     async def test_08_evidence_skipped_when_exceeding_max_size(self):
         """8. Files exceeding maximum_evidence_size_mb skip upload but still emit DLP event."""
@@ -256,7 +256,7 @@ class TestDlpPhase1CUnit(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(client.posted_events), 1)
         ev = client.posted_events[0]
         self.assertIsNone(ev["file_blob_id"])
-        self.assertEqual(ev["metadata"]["evidence_status"], "exceeds_size_limit")
+        self.assertEqual(ev["metadata"]["evidence_status"], "NOT_CAPTURED_SIZE_LIMIT")
         self.assertIn("sha256", ev["metadata"])
 
     async def test_09_locked_or_inaccessible_file_does_not_crash(self):
@@ -277,7 +277,7 @@ class TestDlpPhase1CUnit(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(client.posted_events), 1)
         ev = client.posted_events[0]
         self.assertIsNone(ev["file_blob_id"])
-        self.assertEqual(ev["metadata"]["evidence_status"], "locked_or_unavailable")
+        self.assertEqual(ev["metadata"]["evidence_status"], "NOT_CAPTURED_UNAVAILABLE")
 
     async def test_10_api_failure_does_not_crash_and_recovers_with_bounded_queue(self):
         """10. Transient API failure queues events up to max_queue_size without crashing and flushes on recovery."""

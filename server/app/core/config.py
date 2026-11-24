@@ -37,7 +37,10 @@ class Settings:
     STORAGE_DIR: Path = STORAGE_DIR
     SCREENSHOTS_DIR: Path = SCREENSHOTS_DIR
     DLP_VAULT_DIR: Path = DLP_VAULT_DIR
-    MAX_DLP_FILE_BYTES: int = int(os.getenv("MAX_DLP_FILE_BYTES", str(25 * 1024 * 1024)))
+    DLP_MAX_EVIDENCE_SIZE_MB: float = float(os.getenv("DLP_MAX_EVIDENCE_SIZE_MB", "25"))
+    MAX_DLP_FILE_BYTES: int = int(
+        os.getenv("MAX_DLP_FILE_BYTES", str(int(float(os.getenv("DLP_MAX_EVIDENCE_SIZE_MB", "25")) * 1024 * 1024)))
+    )
     MAX_SCREENSHOTS_PER_DEVICE: int = max(5, int(os.getenv("MAX_SCREENSHOTS_PER_DEVICE", "30")))
     DLP_RETENTION_DAYS: int = max(1, int(os.getenv("DLP_RETENTION_DAYS", "90")))
 

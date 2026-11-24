@@ -558,7 +558,8 @@ class FilesystemEventCollector:
         )
         metadata = {
             "removable_volume": vol.mount_point,
-            "evidence_status": "not_applicable",
+            "file_path": vol.mount_point,
+            "evidence_status": "NO_EVIDENCE",
             "file_size": 0,
         }
         if vol.label:
@@ -904,24 +905,24 @@ class FilesystemEventCollector:
                 snap.sha256 = sha256_hex
 
         file_blob_id: Optional[str] = None
-        evidence_status = "disabled_by_policy"
+        evidence_status = "NOT_CAPTURED_DISABLED"
         needs_deferred_evidence = False
 
         if evidence_enabled and change.event_type in evidence_events:
             if sha256_hex and sha256_hex in self._uploaded_blobs:
                 file_blob_id = self._uploaded_blobs[sha256_hex]
-                evidence_status = "archived"
+                evidence_status = "CAPTURED"
             elif change.known_blob_id:
                 file_blob_id = change.known_blob_id
-                evidence_status = "archived"
+                evidence_status = "CAPTURED"
             elif not change.target_path:
-                evidence_status = "locked_or_unavailable"
+                evidence_status = "NOT_CAPTURED_UNAVAILABLE"
             elif hash_error or sha256_hex is None:
-                evidence_status = "locked_or_unavailable"
+                evidence_status = "NOT_CAPTURED_UNAVAILABLE"
             elif actual_size is not None and actual_size == 0:
-                evidence_status = "empty_file"
+                evidence_status = "NO_EVIDENCE"
             elif actual_size is not None and actual_size > max_evidence_bytes:
-                evidence_status = "exceeds_size_limit"
+                evidence_status = "NOT_CAPTURED_SIZE_LIMIT"
             else:
                 up_res = await self.client.upload_dlp_evidence(
                     file_path=change.target_path,
@@ -932,15 +933,15 @@ class FilesystemEventCollector:
                 if status_str == "ok" and up_res.get("file_id"):
                     file_blob_id = up_res["file_id"]
                     self._uploaded_blobs[sha256_hex] = file_blob_id
-                    evidence_status = "archived"
+                    evidence_status = "CAPTURED"
                     norm_k = os.path.normcase(os.path.abspath(change.target_path))
                     if norm_k in self._snapshot:
                         self._snapshot[norm_k].blob_id = file_blob_id
                 elif status_str in ("retry", "auth_error"):
                     needs_deferred_evidence = True
-                    evidence_status = "pending_retry"
+                    evidence_status = "NOT_CAPTURED_UNAVAILABLE"
                 else:
-                    evidence_status = "upload_failed"
+                    evidence_status = "NOT_CAPTURED_UNAVAILABLE"
 
         endpoint_id = self.config.device_id or ""
         idem_key = generate_idempotency_key(
@@ -959,9 +960,13 @@ class FilesystemEventCollector:
             change.destination_path,
         )
 
+        configured_limit_val = int(max_mb) if max_mb.is_integer() else max_mb
         metadata = {
+            "file_path": change.destination_path or change.source_path,
             "file_size": actual_size if actual_size is not None else 0,
+            "file_extension": change.file_extension or "",
             "evidence_status": evidence_status,
+            "maximum_evidence_size_mb": configured_limit_val,
         }
         if sha256_hex:
             metadata["sha256"] = sha256_hex
@@ -1022,7 +1027,7 @@ class FilesystemEventCollector:
             if up_res.get("status") == "ok" and up_res.get("file_id"):
                 blob_id = up_res["file_id"]
                 payload["file_blob_id"] = blob_id
-                payload["metadata"]["evidence_status"] = "archived"
+                payload["metadata"]["evidence_status"] = "CAPTURED"
                 self._uploaded_blobs[item["expected_sha256"]] = blob_id
                 item["target_path"] = None
             elif up_res.get("status") in ("retry", "auth_error") and item["attempts"] < 3:
@@ -1030,7 +1035,7 @@ class FilesystemEventCollector:
                 self._retry_queue.append(item)
                 return False
             else:
-                payload["metadata"]["evidence_status"] = "upload_failed"
+                payload["metadata"]["evidence_status"] = "NOT_CAPTURED_UNAVAILABLE"
                 item["target_path"] = None
 
         res = await self.client.post_dlp_event(payload)

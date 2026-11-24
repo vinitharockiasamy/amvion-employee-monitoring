@@ -45,6 +45,14 @@ def _is_valid_active_url(u: str) -> bool:
     return True
 
 def _default_dlp_settings() -> dict:
+    env_enabled = os.getenv("DLP_EVIDENCE_ENABLED", "").strip().lower()
+    evidence_enabled = False if env_enabled in ("0", "false", "no", "off") else True
+    try:
+        max_mb = float(os.getenv("DLP_MAX_EVIDENCE_SIZE_MB", "25"))
+    except ValueError:
+        max_mb = 25.0
+    max_mb_val = int(max_mb) if max_mb.is_integer() else max_mb
+
     return {
         "enabled": True,
         "monitored_directories": [
@@ -54,8 +62,8 @@ def _default_dlp_settings() -> dict:
             "Pictures"
         ],
         "monitor_removable_storage": True,
-        "evidence_enabled": True,
-        "maximum_evidence_size_mb": 25,
+        "evidence_enabled": evidence_enabled,
+        "maximum_evidence_size_mb": max_mb_val,
         "evidence_events": [
             "CREATED",
             "MODIFIED",

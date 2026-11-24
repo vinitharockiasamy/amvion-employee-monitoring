@@ -129,6 +129,33 @@ class DlpEvent(Base):
                 parsed_meta = {"raw": self.event_metadata}
         comp_name = self.endpoint.computer_name if self.endpoint else None
         has_blob = bool(self.file_blob_id and self.file_blob)
+
+        raw_status = str(parsed_meta.get("evidence_status") or "").strip()
+        legacy_map = {
+            "CAPTURED": "CAPTURED",
+            "archived": "CAPTURED",
+            "NOT_CAPTURED_SIZE_LIMIT": "NOT_CAPTURED_SIZE_LIMIT",
+            "exceeds_size_limit": "NOT_CAPTURED_SIZE_LIMIT",
+            "NOT_CAPTURED_UNAVAILABLE": "NOT_CAPTURED_UNAVAILABLE",
+            "locked_or_unavailable": "NOT_CAPTURED_UNAVAILABLE",
+            "upload_failed": "NOT_CAPTURED_UNAVAILABLE",
+            "NOT_CAPTURED_DISABLED": "NOT_CAPTURED_DISABLED",
+            "disabled_by_policy": "NOT_CAPTURED_DISABLED",
+            "NO_EVIDENCE": "NO_EVIDENCE",
+            "not_applicable": "NO_EVIDENCE",
+            "empty_file": "NO_EVIDENCE",
+        }
+        if has_blob:
+            evidence_status = "CAPTURED"
+        else:
+            evidence_status = legacy_map.get(raw_status, "NO_EVIDENCE")
+            if evidence_status == "CAPTURED":
+                evidence_status = "NO_EVIDENCE"
+
+        parsed_meta["evidence_status"] = evidence_status
+        if not parsed_meta.get("file_path") and (self.destination_path or self.source_path):
+            parsed_meta["file_path"] = self.destination_path or self.source_path
+
         return {
             "id": self.id,
             "endpoint_id": self.endpoint_id,
@@ -144,6 +171,7 @@ class DlpEvent(Base):
             "risk_level": self.risk_level,
             "file_blob_id": self.file_blob_id,
             "has_content": has_blob,
+            "evidence_status": evidence_status,
             "file_size": self.file_blob.file_size if has_blob else parsed_meta.get("file_size", 0),
             "download_url": f"/api/dlp/files/{self.file_blob_id}/download" if has_blob else None,
             "timestamp": (self.timestamp.isoformat() + "Z") if self.timestamp else None,

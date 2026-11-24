@@ -785,15 +785,20 @@ function renderDlpTable() {
         const metaNote = (ev.metadata && (ev.metadata.window_title || ev.metadata.drive_label || ev.metadata.details)) || '';
         const dlUrl = ev.download_url ? appendAdminTokenQuery(ev.download_url) : '#';
 
-        const evStatusRaw = (ev.metadata && ev.metadata.evidence_status) || '';
-        const evStatusLabels = {
-            'exceeds_size_limit': 'Exceeds 25 MB limit',
-            'locked_or_unavailable': 'File locked / unavailable',
-            'disabled_by_policy': 'Disabled by policy',
-            'not_applicable': 'Volume event',
-            'upload_failed': 'Evidence upload failed'
+        const evStatusCode = ev.evidence_status || (ev.metadata && ev.metadata.evidence_status) || 'NO_EVIDENCE';
+        const configuredMaxMb = (ev.metadata && ev.metadata.maximum_evidence_size_mb) || 25;
+        const evStatusReasons = {
+            'NOT_CAPTURED_SIZE_LIMIT': `File exceeds ${configuredMaxMb} MB evidence limit`,
+            'exceeds_size_limit': `File exceeds ${configuredMaxMb} MB evidence limit`,
+            'NOT_CAPTURED_UNAVAILABLE': 'File unavailable or deleted before capture',
+            'locked_or_unavailable': 'File unavailable or deleted before capture',
+            'upload_failed': 'File unavailable during upload',
+            'NOT_CAPTURED_DISABLED': 'Evidence capture disabled by policy',
+            'disabled_by_policy': 'Evidence capture disabled by policy',
+            'NO_EVIDENCE': 'No file evidence attached',
+            'not_applicable': 'Volume lifecycle event'
         };
-        const fallbackStatusLabel = evStatusLabels[evStatusRaw] || (evStatusRaw ? escapeHtml(evStatusRaw) : 'No evidence');
+        const statusReasonText = evStatusReasons[evStatusCode] || 'No file evidence attached';
 
         const actionBtns = ev.has_content && ev.file_blob_id
             ? `<div class="inline-flex items-center space-x-1.5">
@@ -807,7 +812,10 @@ function renderDlpTable() {
                        ↓
                    </a>
                </div>`
-            : `<span class="text-[11px] text-slate-500">${fallbackStatusLabel}</span>`;
+            : `<div class="inline-flex flex-col items-end">
+                   <span class="px-2 py-0.5 rounded bg-slate-700/70 border border-slate-600 text-[10px] font-semibold text-slate-300">Evidence Not Captured</span>
+                   <span class="text-[10px] text-slate-400 mt-0.5">${escapeHtml(statusReasonText)}</span>
+               </div>`;
 
         return `
             <tr class="hover:bg-slate-800/90 transition">

@@ -344,10 +344,10 @@ class TestUsbRemovableDlp(unittest.IsolatedAsyncioTestCase):
 
         by_name = {e["file_name"]: e for e in client.posted_events}
         self.assertIsNotNone(by_name["usb_summary.txt"]["file_blob_id"])
-        self.assertEqual(by_name["usb_summary.txt"]["metadata"]["evidence_status"], "archived")
+        self.assertEqual(by_name["usb_summary.txt"]["metadata"]["evidence_status"], "CAPTURED")
 
         self.assertIsNone(by_name["huge_usb_dump.bin"]["file_blob_id"])
-        self.assertEqual(by_name["huge_usb_dump.bin"]["metadata"]["evidence_status"], "exceeds_size_limit")
+        self.assertEqual(by_name["huge_usb_dump.bin"]["metadata"]["evidence_status"], "NOT_CAPTURED_SIZE_LIMIT")
         self.assertEqual(by_name["huge_usb_dump.bin"]["channel"], USB_CHANNEL_NAME)
 
     async def test_08_abrupt_disconnected_volume_errors_do_not_crash(self):
@@ -368,7 +368,7 @@ class TestUsbRemovableDlp(unittest.IsolatedAsyncioTestCase):
             await collector.run_once()
 
         self.assertEqual(len(client.posted_events), 1)
-        self.assertEqual(client.posted_events[0]["metadata"]["evidence_status"], "locked_or_unavailable")
+        self.assertEqual(client.posted_events[0]["metadata"]["evidence_status"], "NOT_CAPTURED_UNAVAILABLE")
 
         # Simulate volume vanishing physically before detector updates
         shutil.rmtree(self.usb_mount)
