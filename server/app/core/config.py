@@ -5,6 +5,7 @@ from pathlib import Path
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 STORAGE_DIR = BASE_DIR / "storage"
 SCREENSHOTS_DIR = STORAGE_DIR / "screenshots"
+DLP_VAULT_DIR = STORAGE_DIR / "dlp_vault"
 
 class Settings:
     PROJECT_NAME: str = "Employee Monitoring System"
@@ -14,6 +15,8 @@ class Settings:
     BASE_DIR: Path = BASE_DIR
     STORAGE_DIR: Path = STORAGE_DIR
     SCREENSHOTS_DIR: Path = SCREENSHOTS_DIR
+    DLP_VAULT_DIR: Path = DLP_VAULT_DIR
+    MAX_DLP_FILE_BYTES: int = 25 * 1024 * 1024  # 25 MB max per archived file
     DATABASE_URL: str = f"sqlite:///{BASE_DIR / 'monitoring.db'}"
     
     # Defaults
@@ -39,3 +42,4 @@ class Settings:
 
 settings = Settings()
 settings.SCREENSHOTS_DIR.mkdir(parents=True, exist_ok=True)
+settings.DLP_VAULT_DIR.mkdir(parents=True, exist_ok=True)

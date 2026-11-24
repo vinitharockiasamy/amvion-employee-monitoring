@@ -2,9 +2,10 @@ import json
 import asyncio
 from datetime import datetime
 from typing import Dict, Set, Optional
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query, status
 from server.app.db.session import SessionLocal
 from server.app.db.models import Device
+from server.app.core.security import verify_admin_ws_token
 
 router = APIRouter(tags=["WebSockets"])
 
@@ -14,6 +15,8 @@ class ConnectionManager:
         self.active_agents: Dict[str, WebSocket] = {}
         # Set of dashboard WebSockets
         self.active_dashboards: Set[WebSocket] = set()
+        # Set of authenticated DLP admin WebSockets
+        self.active_dlp_admins: Set[WebSocket] = set()
         # device_id -> set of dashboard WebSockets currently watching this device
         self.stream_viewers: Dict[str, Set[WebSocket]] = {}
 
@@ -73,6 +76,27 @@ class ConnectionManager:
             except Exception:
                 dead_sockets.add(ws)
         self.active_dashboards.difference_update(dead_sockets)
+
+    async def connect_dlp_admin(self, websocket: WebSocket):
+        await websocket.accept()
+        self.active_dlp_admins.add(websocket)
+
+    def disconnect_dlp_admin(self, websocket: WebSocket):
+        self.active_dlp_admins.discard(websocket)
+
+    async def broadcast_dlp_event(self, event_dict: dict):
+        payload = {
+            "type": "DLP_EVENT_CREATED",
+            "event": event_dict
+        }
+        dead_admins = set()
+        for ws in self.active_dlp_admins:
+            try:
+                await ws.send_json(payload)
+            except Exception:
+                dead_admins.add(ws)
+        self.active_dlp_admins.difference_update(dead_admins)
+        await self.broadcast_to_dashboards(payload)
 
     async def send_to_agent(self, device_id: str, message: dict):
         ws = self.active_agents.get(device_id)
@@ -200,3 +224,28 @@ async def dashboard_websocket_endpoint(websocket: WebSocket):
     except Exception as e:
         print(f"[WS Dashboard] Exception: {e}")
         manager.disconnect_dashboard(websocket)
+
+@router.websocket("/ws/dlp")
+async def dlp_admin_websocket_endpoint(
+    websocket: WebSocket,
+    token: Optional[str] = Query(None)
+):
+    """Authenticated WebSocket feed for administrator DLP event notifications."""
+    header_token = websocket.headers.get("x-admin-token")
+    auth_header = websocket.headers.get("authorization", "")
+    if not header_token and auth_header.startswith("Bearer "):
+        header_token = auth_header.split("Bearer ", 1)[1].strip()
+
+    effective_token = token or header_token
+    if not verify_admin_ws_token(effective_token):
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        return
+
+    await manager.connect_dlp_admin(websocket)
+    try:
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        manager.disconnect_dlp_admin(websocket)
+    except Exception:
+        manager.disconnect_dlp_admin(websocket)

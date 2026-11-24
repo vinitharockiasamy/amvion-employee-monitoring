@@ -9,18 +9,35 @@ let reconnectTimer = null;
 let lastFrameTime = performance.now();
 let frameCount = 0;
 let fpsInterval = null;
+let currentMainTab = 'wall';
+let dlpEventsList = [];
+let dlpSearchTimer = null;
+
+function getAdminHeaders() {
+    const tok = window.ADMIN_AUTH_TOKEN || '';
+    return tok ? { 'Authorization': `Bearer ${tok}` } : {};
+}
+
+function appendAdminTokenQuery(url) {
+    const tok = window.ADMIN_AUTH_TOKEN || '';
+    if (!tok || !url) return url;
+    const sep = url.includes('?') ? '&' : '?';
+    return `${url}${sep}token=${encodeURIComponent(tok)}`;
+}
 
 // Initialize
 document.addEventListener('DOMContentLoaded', () => {
     fetchDevices();
+    fetchDlpEvents();
     fetchPublicUrl();
     connectWebSocket();
     startRelativeTimeTicker();
 
-    // Keyboard shortcut: Esc to exit detail view
+    // Keyboard shortcut: Esc to exit modals
     document.addEventListener('keydown', (e) => {
-        if (e.key === 'Escape' && activeStreamDeviceId) {
-            closeDetailModal();
+        if (e.key === 'Escape') {
+            if (activeStreamDeviceId) closeDetailModal();
+            closeDlpPreviewModal();
         }
     });
 });
@@ -68,6 +85,7 @@ async function fetchDevices() {
         data.devices.forEach(d => devicesMap.set(d.device_id, d));
         
         updateStats();
+        populateDlpDeviceDropdown();
         renderScreenWall();
     } catch (err) {
         console.error('Failed to fetch devices:', err);
@@ -148,6 +166,16 @@ function handleWsMessage(msg) {
             break;
         case 'STREAM_AGENT_OFFLINE':
             handleStreamAgentOffline(msg);
+            break;
+        case 'DEVICE_REMOVED':
+            devicesMap.delete(msg.device_id);
+            updateStats();
+            renderScreenWall();
+            break;
+        case 'DLP_EVENT_CREATED':
+            if (msg.event) {
+                handleIncomingDlpEvent(msg.event);
+            }
             break;
     }
 }
@@ -585,4 +613,284 @@ function escapeHtml(str) {
         .replace(/</g, '&lt;')
         .replace(/>/g, '&gt;')
         .replace(/"/g, '&quot;');
+}
+
+// =====================================================================
+// PHASE 1B: DLP AUDIT & IN-BROWSER FILE CONTENT VIEWER
+// =====================================================================
+
+function switchMainTab(tab) {
+    currentMainTab = tab;
+    const secWall = document.getElementById('sectionScreenWall');
+    const secDlp = document.getElementById('sectionDlpVault');
+    const btnWall = document.getElementById('navTabWall');
+    const btnDlp = document.getElementById('navTabDlp');
+
+    if (tab === 'dlp') {
+        if (secWall) secWall.classList.add('hidden');
+        if (secDlp) {
+            secDlp.classList.remove('hidden');
+            secDlp.classList.add('flex');
+        }
+        if (btnDlp) btnDlp.className = 'px-3.5 py-1.5 rounded-lg text-xs font-semibold bg-emerald-500 text-slate-950 transition flex items-center space-x-1.5';
+        if (btnWall) btnWall.className = 'px-3.5 py-1.5 rounded-lg text-xs font-semibold text-slate-300 hover:text-white hover:bg-slate-800 transition flex items-center space-x-1.5';
+        fetchDlpEvents();
+    } else {
+        if (secDlp) {
+            secDlp.classList.add('hidden');
+            secDlp.classList.remove('flex');
+        }
+        if (secWall) secWall.classList.remove('hidden');
+        if (btnWall) btnWall.className = 'px-3.5 py-1.5 rounded-lg text-xs font-semibold bg-emerald-500 text-slate-950 transition flex items-center space-x-1.5';
+        if (btnDlp) btnDlp.className = 'px-3.5 py-1.5 rounded-lg text-xs font-semibold text-slate-300 hover:text-white hover:bg-slate-800 transition flex items-center space-x-1.5';
+    }
+}
+
+function populateDlpDeviceDropdown() {
+    const sel = document.getElementById('dlpDeviceFilter');
+    if (!sel) return;
+    const prev = sel.value || 'all';
+    const opts = ['<option value="all">All Endpoints</option>'];
+    devicesMap.forEach((dev) => {
+        opts.push(`<option value="${escapeHtml(dev.device_id)}">${escapeHtml(dev.employee_name)} (${escapeHtml(dev.computer_name)})</option>`);
+    });
+    sel.innerHTML = opts.join('');
+    sel.value = prev;
+}
+
+function debouncedFetchDlpEvents() {
+    clearTimeout(dlpSearchTimer);
+    dlpSearchTimer = setTimeout(fetchDlpEvents, 280);
+}
+
+async function fetchDlpEvents() {
+    try {
+        const params = new URLSearchParams();
+        const ep = document.getElementById('dlpDeviceFilter')?.value || 'all';
+        const act = document.getElementById('dlpActionFilter')?.value || 'all';
+        const ch = document.getElementById('dlpChannelFilter')?.value || 'all';
+        const risk = document.getElementById('dlpRiskFilter')?.value || 'all';
+        const q = document.getElementById('dlpSearchInput')?.value?.trim() || '';
+        const startDt = document.getElementById('dlpStartDate')?.value || '';
+        const endDt = document.getElementById('dlpEndDate')?.value || '';
+
+        if (ep !== 'all') params.set('endpoint', ep);
+        if (act !== 'all') params.set('event_type', act);
+        if (ch !== 'all') params.set('channel', ch);
+        if (risk !== 'all') params.set('risk_level', risk);
+        if (q) params.set('search', q);
+        if (startDt) params.set('start_date', `${startDt}T00:00:00`);
+        if (endDt) params.set('end_date', `${endDt}T23:59:59`);
+        params.set('limit', '200');
+
+        const res = await fetch(`/api/dlp/events?${params.toString()}`, {
+            headers: getAdminHeaders()
+        });
+        if (!res.ok) return;
+        const data = await res.json();
+        dlpEventsList = data.events || [];
+        updateDlpSummaryUI(data.summary || { total_events: data.total || 0 });
+        renderDlpTable();
+    } catch (err) {
+        console.error('Failed to fetch DLP events:', err);
+    }
+}
+
+function updateDlpSummaryUI(sum) {
+    const setTxt = (id, val) => {
+        const el = document.getElementById(id);
+        if (el) el.textContent = val ?? 0;
+    };
+    setTxt('dlpStatTotal', sum.total_events || 0);
+    setTxt('dlpStatHighRisk', sum.high_risk_count || 0);
+    setTxt('dlpStatArchived', sum.archived_files_count || 0);
+    setTxt('dlpStatExternal', sum.external_transfers_count || 0);
+    setTxt('dlpStatDeleted', sum.deleted_files_count || 0);
+    setTxt('navDlpBadge', sum.total_events || 0);
+}
+
+function handleIncomingDlpEvent(ev) {
+    dlpEventsList.unshift(ev);
+    if (dlpEventsList.length > 250) dlpEventsList.pop();
+    const badge = document.getElementById('navDlpBadge');
+    if (badge) badge.textContent = String((parseInt(badge.textContent || '0', 10) || 0) + 1);
+    if (currentMainTab === 'dlp') {
+        fetchDlpEvents();
+    }
+}
+
+function formatBytes(bytes) {
+    const n = Number(bytes) || 0;
+    if (n <= 0) return '—';
+    if (n < 1024) return `${n} B`;
+    if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+    return `${(n / (1024 * 1024)).toFixed(2)} MB`;
+}
+
+function renderDlpTable() {
+    const tbody = document.getElementById('dlpEventsTableBody');
+    const emptyEl = document.getElementById('dlpEmptyState');
+    if (!tbody) return;
+
+    if (!dlpEventsList.length) {
+        tbody.innerHTML = '';
+        if (emptyEl) emptyEl.classList.remove('hidden');
+        return;
+    }
+    if (emptyEl) emptyEl.classList.add('hidden');
+
+    tbody.innerHTML = dlpEventsList.map(ev => {
+        const riskStyles = (ev.risk_level === 'high' || ev.risk_level === 'critical')
+            ? 'bg-rose-500/20 text-rose-300 border-rose-500/40'
+            : (ev.risk_level === 'medium'
+                ? 'bg-amber-500/20 text-amber-300 border-amber-500/40'
+                : 'bg-slate-700/70 text-slate-300 border-slate-600');
+
+        const actionBadge = ev.event_type === 'DELETED'
+            ? 'bg-rose-500/15 text-rose-300'
+            : (ev.event_type === 'USB_TRANSFER' || ev.event_type === 'WEB_UPLOAD'
+                ? 'bg-amber-500/15 text-amber-300'
+                : 'bg-sky-500/15 text-sky-300');
+
+        const srcText = ev.source_path ? escapeHtml(ev.source_path) : '—';
+        const dstText = ev.destination_path
+            ? `<div class="text-emerald-300 mt-0.5 truncate max-w-xs" title="${escapeHtml(ev.destination_path)}">→ ${escapeHtml(ev.destination_path)}</div>`
+            : '';
+
+        const metaNote = (ev.metadata && (ev.metadata.window_title || ev.metadata.drive_label || ev.metadata.details)) || '';
+        const dlUrl = ev.download_url ? appendAdminTokenQuery(ev.download_url) : '#';
+
+        const evStatusRaw = (ev.metadata && ev.metadata.evidence_status) || '';
+        const evStatusLabels = {
+            'exceeds_size_limit': 'Exceeds 25 MB limit',
+            'locked_or_unavailable': 'File locked / unavailable',
+            'disabled_by_policy': 'Disabled by policy',
+            'not_applicable': 'Volume event',
+            'upload_failed': 'Evidence upload failed'
+        };
+        const fallbackStatusLabel = evStatusLabels[evStatusRaw] || (evStatusRaw ? escapeHtml(evStatusRaw) : 'No evidence');
+
+        const actionBtns = ev.has_content && ev.file_blob_id
+            ? `<div class="inline-flex items-center space-x-1.5">
+                   <button onclick="openDlpPreviewModal('${ev.file_blob_id}')"
+                           class="px-2.5 py-1 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-semibold text-[11px] transition">
+                       View File
+                   </button>
+                   <a href="${dlUrl}" download
+                      class="px-2 py-1 rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-200 text-[11px] transition"
+                      title="Download original file">
+                       ↓
+                   </a>
+               </div>`
+            : `<span class="text-[11px] text-slate-500">${fallbackStatusLabel}</span>`;
+
+        return `
+            <tr class="hover:bg-slate-800/90 transition">
+                <td class="py-3 px-4 whitespace-nowrap font-mono text-[11px] text-slate-400">
+                    ${formatRelativeTime(ev.timestamp)}
+                </td>
+                <td class="py-3 px-4 whitespace-nowrap">
+                    <div class="font-semibold text-white">${escapeHtml(ev.employee_name)}</div>
+                    <div class="text-[11px] font-mono text-slate-400">${escapeHtml(ev.computer_name || ev.endpoint_id)}</div>
+                </td>
+                <td class="py-3 px-4 whitespace-nowrap">
+                    <span class="inline-block px-2 py-0.5 rounded font-semibold text-[10px] ${actionBadge}">${escapeHtml(ev.event_type)}</span>
+                    <span class="ml-1 inline-block px-2 py-0.5 rounded-full border text-[10px] uppercase font-bold ${riskStyles}">${escapeHtml(ev.risk_level)}</span>
+                </td>
+                <td class="py-3 px-4">
+                    <div class="font-semibold text-slate-100 truncate max-w-[200px]" title="${escapeHtml(ev.file_name)}">${escapeHtml(ev.file_name)}</div>
+                    <div class="text-[11px] text-slate-400 font-mono">${formatBytes(ev.file_size)}</div>
+                </td>
+                <td class="py-3 px-4 font-mono text-[11px] text-slate-300">
+                    <div class="truncate max-w-xs" title="${srcText}">${srcText}</div>
+                    ${dstText}
+                </td>
+                <td class="py-3 px-4">
+                    <div class="font-medium text-slate-200">${escapeHtml(ev.channel)}</div>
+                    ${ev.application_name ? `<div class="text-[11px] text-sky-300 font-mono">${escapeHtml(ev.application_name)}</div>` : ''}
+                    ${metaNote ? `<div class="text-[11px] text-slate-400 truncate max-w-[200px]" title="${escapeHtml(metaNote)}">${escapeHtml(metaNote)}</div>` : ''}
+                </td>
+                <td class="py-3 px-4 text-right whitespace-nowrap">
+                    ${actionBtns}
+                </td>
+            </tr>
+        `;
+    }).join('');
+}
+
+async function openDlpPreviewModal(fileId) {
+    const modal = document.getElementById('dlpPreviewModal');
+    const titleEl = document.getElementById('dlpModalFileName');
+    const metaEl = document.getElementById('dlpModalMeta');
+    const dlBtn = document.getElementById('dlpModalDownloadBtn');
+    const viewport = document.getElementById('dlpModalViewport');
+    if (!modal || !viewport) return;
+
+    modal.classList.remove('hidden');
+    modal.classList.add('flex');
+    viewport.innerHTML = `<div class="text-slate-400 text-sm">Loading archived file content...</div>`;
+
+    try {
+        const res = await fetch(`/api/dlp/files/${fileId}/preview`, {
+            headers: getAdminHeaders()
+        });
+        if (!res.ok) throw new Error('File content not available');
+        const info = await res.json();
+
+        const rawAuthUrl = appendAdminTokenQuery(info.raw_url);
+        const dlAuthUrl = appendAdminTokenQuery(info.download_url);
+
+        if (titleEl) titleEl.textContent = info.original_filename;
+        if (metaEl) metaEl.textContent = `${formatBytes(info.file_size)} • ${info.content_type} • SHA-256: ${(info.sha256 || '').slice(0, 16)}...`;
+        if (dlBtn) dlBtn.href = dlAuthUrl;
+
+        if (info.kind === 'image') {
+            viewport.innerHTML = `<img src="${rawAuthUrl}" alt="${escapeHtml(info.original_filename)}" class="max-h-[72vh] max-w-full object-contain rounded-lg shadow-lg">`;
+        } else if (info.kind === 'pdf') {
+            viewport.innerHTML = `<iframe src="${rawAuthUrl}" class="w-full h-[72vh] rounded-lg border border-slate-700 bg-white"></iframe>`;
+        } else if (info.kind === 'video') {
+            viewport.innerHTML = `<video src="${rawAuthUrl}" controls autoplay class="max-h-[72vh] max-w-full rounded-lg"></video>`;
+        } else if (info.kind === 'audio') {
+            viewport.innerHTML = `<audio src="${rawAuthUrl}" controls autoplay class="w-full max-w-lg"></audio>`;
+        } else if (info.kind === 'document' || info.kind === 'text') {
+            viewport.innerHTML = `<pre class="w-full max-h-[72vh] overflow-auto bg-slate-900 border border-slate-700 rounded-xl p-5 text-xs text-slate-200 font-mono whitespace-pre-wrap self-start">${escapeHtml(info.content || '')}</pre>`;
+        } else if (info.kind === 'table') {
+            const rows = info.rows || [];
+            if (!rows.length) {
+                viewport.innerHTML = `<div class="text-slate-400 text-sm">Empty spreadsheet / table.</div>`;
+            } else {
+                const tableHtml = rows.map((r, idx) => {
+                    const cellTag = idx === 0 ? 'th' : 'td';
+                    const cellCls = idx === 0
+                        ? 'py-2 px-3 bg-slate-800 font-semibold text-emerald-300 border border-slate-700 text-xs'
+                        : 'py-1.5 px-3 border border-slate-800 text-slate-200 text-xs font-mono';
+                    return `<tr>${r.map(c => `<${cellTag} class="${cellCls}">${escapeHtml(c)}</${cellTag}>`).join('')}</tr>`;
+                }).join('');
+                viewport.innerHTML = `<div class="w-full max-h-[72vh] overflow-auto self-start"><table class="w-full border-collapse">${tableHtml}</table></div>`;
+            }
+        } else if (info.kind === 'archive') {
+            const listHtml = (info.entries || []).map(e =>
+                `<tr class="border-b border-slate-800"><td class="py-1.5 px-3 font-mono text-xs text-slate-200">${escapeHtml(e.name)}</td><td class="py-1.5 px-3 font-mono text-xs text-slate-400 text-right">${formatBytes(e.size)}</td></tr>`
+            ).join('');
+            viewport.innerHTML = `<div class="w-full max-h-[72vh] overflow-auto self-start"><table class="w-full text-left"><thead class="bg-slate-800 text-xs text-slate-300"><tr><th class="py-2 px-3">Archive Entry</th><th class="py-2 px-3 text-right">Size</th></tr></thead><tbody>${listHtml}</tbody></table></div>`;
+        } else {
+            viewport.innerHTML = `
+                <div class="text-center max-w-md space-y-3">
+                    <div class="text-sm font-semibold text-white">${escapeHtml(info.original_filename)}</div>
+                    <p class="text-xs text-slate-400">${escapeHtml(info.note || 'Download the archived file to view it in its native CAD/design software.')}</p>
+                </div>`;
+        }
+    } catch (err) {
+        viewport.innerHTML = `<div class="text-rose-400 text-sm">Unable to preview file: ${escapeHtml(err.message)}</div>`;
+    }
+}
+
+function closeDlpPreviewModal() {
+    const modal = document.getElementById('dlpPreviewModal');
+    const viewport = document.getElementById('dlpModalViewport');
+    if (modal) {
+        modal.classList.add('hidden');
+        modal.classList.remove('flex');
+    }
+    if (viewport) viewport.innerHTML = '';
 }

@@ -7,7 +7,9 @@ dist/
 *.db
 server/monitoring.db
 server/storage/screenshots/*
+server/storage/dlp_vault/*
 agent/agent_state.json
 cloudflared.exe
 installer/runtime/
 EmployeeMonitoringAgent-Setup.zip
+scratch/

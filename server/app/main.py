@@ -8,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from server.app.core.config import settings
 from server.app.db.session import init_db, SessionLocal
 from server.app.db.models import Device
-from server.app.api import auth, agent, admin, websocket
+from server.app.api import auth, agent, admin, websocket, dlp
 
 app = FastAPI(
     title=settings.PROJECT_NAME,
@@ -33,6 +33,7 @@ templates = Jinja2Templates(directory=settings.BASE_DIR / "templates")
 app.include_router(auth.router, prefix=settings.API_V1_STR)
 app.include_router(agent.router, prefix=settings.API_V1_STR)
 app.include_router(admin.router, prefix=settings.API_V1_STR)
+app.include_router(dlp.router)
 app.include_router(websocket.router)
 
 async def presence_watchdog():
@@ -68,7 +69,14 @@ async def startup_event():
 
 @app.get("/")
 async def root(request: Request):
-    return templates.TemplateResponse(request=request, name="index.html", context={"app_name": settings.PROJECT_NAME})
+    return templates.TemplateResponse(
+        request=request,
+        name="index.html",
+        context={
+            "app_name": settings.PROJECT_NAME,
+            "admin_token": settings.ADMIN_AUTH_TOKEN
+        }
+    )
 
 @app.get("/health")
 async def health_check():

@@ -148,27 +148,31 @@ def get_public_url(request: Request):
             pass
     return {"public_url": url}
 
+def _find_latest_msi(project_root) -> Optional[object]:
+    candidates = sorted(project_root.glob("EMP-SA-enterprise-*.msi"))
+    return candidates[-1] if candidates else None
+
 @router.get("/download-msi")
 def download_agent_msi():
     project_root = settings.BASE_DIR.parent
-    msi_path = project_root / "EMP-SA-enterprise-1.0.0.msi"
-    if not msi_path.exists():
+    msi_path = _find_latest_msi(project_root)
+    if not msi_path or not msi_path.exists():
         raise HTTPException(status_code=404, detail="MSI installer package not found")
     return FileResponse(
         str(msi_path),
         media_type="application/x-msi",
-        filename="EMP-SA-enterprise-1.0.0.msi"
+        filename=msi_path.name
     )
 
 @router.get("/download-agent")
 def download_agent_zip(request: Request):
     project_root = settings.BASE_DIR.parent
-    msi_path = project_root / "EMP-SA-enterprise-1.0.0.msi"
-    if msi_path.exists():
+    msi_path = _find_latest_msi(project_root)
+    if msi_path and msi_path.exists():
         return FileResponse(
             str(msi_path),
             media_type="application/x-msi",
-            filename="EMP-SA-enterprise-1.0.0.msi"
+            filename=msi_path.name
         )
     installer_dir = project_root / "installer"
     zip_path = project_root / "EmployeeMonitoringAgent-Setup.zip"

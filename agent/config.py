@@ -44,6 +44,32 @@ def _is_valid_active_url(u: str) -> bool:
         return False
     return True
 
+def _default_dlp_settings() -> dict:
+    return {
+        "enabled": True,
+        "monitored_directories": [
+            "Desktop",
+            "Documents",
+            "Downloads",
+            "Pictures"
+        ],
+        "monitor_removable_storage": True,
+        "evidence_enabled": True,
+        "maximum_evidence_size_mb": 25,
+        "evidence_events": [
+            "CREATED",
+            "MODIFIED",
+            "MOVED",
+            "RENAMED",
+            "COPIED",
+            "USB_TRANSFER",
+            "DELETED"
+        ],
+        "poll_interval_sec": 2.0,
+        "max_queue_size": 500
+    }
+
+
 class AgentConfig:
     def __init__(self):
         self.server_url = os.getenv("SERVER_URL", DEFAULT_PUBLIC_URL)
@@ -51,11 +77,30 @@ class AgentConfig:
         self.screenshot_interval_sec = 3
         self.compression_quality = 70
         self.thumbnail_width = 1280
+        self.dlp = _default_dlp_settings()
         
         self.device_id = None
         self.device_secret = None
         
         self.load_state()
+
+    def resolve_monitored_directories(self) -> list:
+        """Resolve configured directory names (relative to user profile or absolute paths)."""
+        home = Path.home()
+        resolved = []
+        seen = set()
+        for entry in self.dlp.get("monitored_directories", []):
+            if not entry:
+                continue
+            p = Path(entry)
+            if not p.is_absolute():
+                p = home / p
+            norm = str(p.resolve()) if p.exists() else str(p)
+            key = norm.lower()
+            if key not in seen:
+                seen.add(key)
+                resolved.append(Path(norm))
+        return resolved
 
     def discover_cloud_url(self) -> bool:
         """Automatically discover the active Render Cloud URL if the service subdomain was renamed."""
@@ -94,6 +139,10 @@ class AgentConfig:
                     self.device_id = data.get("device_id")
                     self.device_secret = data.get("device_secret")
                     self.screenshot_interval_sec = 3
+                    if isinstance(data.get("dlp"), dict):
+                        merged = _default_dlp_settings()
+                        merged.update(data["dlp"])
+                        self.dlp = merged
             except Exception as e:
                 print(f"[Config] Error loading state: {e}")
 
@@ -112,7 +161,8 @@ class AgentConfig:
             self.device_secret = None
 
         self.server_url = target_url
-        self.discover_cloud_url()
+        if not os.getenv("TESTING"):
+            self.discover_cloud_url()
 
     def save_state(self):
         try:
@@ -121,7 +171,8 @@ class AgentConfig:
                 "device_id": self.device_id,
                 "device_secret": self.device_secret,
                 "screenshot_interval_sec": self.screenshot_interval_sec,
-                "compression_quality": self.compression_quality
+                "compression_quality": self.compression_quality,
+                "dlp": self.dlp
             }
             with open(CONFIG_FILE, "w") as f:
                 json.dump(data, f, indent=2)

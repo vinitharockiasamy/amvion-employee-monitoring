@@ -1,7 +1,7 @@
 import hashlib
 import secrets
 from typing import Optional
-from fastapi import Header, HTTPException, status, Depends
+from fastapi import Header, HTTPException, Query, status, Depends
 from sqlalchemy.orm import Session
 from server.app.core.config import settings
 from server.app.db.session import get_db
@@ -46,17 +46,37 @@ def authenticate_device(
 
 def authenticate_admin(
     authorization: Optional[str] = Header(None, alias="Authorization"),
-    x_admin_token: Optional[str] = Header(None, alias="X-Admin-Token")
+    x_admin_token: Optional[str] = Header(None, alias="X-Admin-Token"),
+    token: Optional[str] = Query(None, description="Optional admin token for browser media/download links")
 ) -> bool:
-    token = None
-    if authorization and authorization.startswith("Bearer "):
-        token = authorization.split("Bearer ")[1].strip()
-    elif x_admin_token:
-        token = x_admin_token
+    resolved = None
+    if isinstance(authorization, str) and authorization.startswith("Bearer "):
+        resolved = authorization.split("Bearer ")[1].strip()
+    elif isinstance(x_admin_token, str) and x_admin_token:
+        resolved = x_admin_token.strip()
+    elif isinstance(token, str) and token:
+        resolved = token.strip()
         
-    if not token or token != settings.ADMIN_AUTH_TOKEN:
+    if not resolved or not secrets.compare_digest(resolved, settings.ADMIN_AUTH_TOKEN):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Admin authentication required"
         )
     return True
+
+def verify_admin_ws_token(token: Optional[str]) -> bool:
+    if not token:
+        return False
+    return secrets.compare_digest(token.strip(), settings.ADMIN_AUTH_TOKEN)
+
+def authenticate_device_or_admin(
+    x_device_id: Optional[str] = Header(None, alias="X-Device-Id"),
+    authorization: Optional[str] = Header(None, alias="Authorization"),
+    x_admin_token: Optional[str] = Header(None, alias="X-Admin-Token"),
+    db: Session = Depends(get_db)
+) -> Optional[Device]:
+    """Allow enrolled endpoints (X-Device-Id + Bearer secret) or authenticated admins to ingest DLP records."""
+    if isinstance(x_device_id, str) and x_device_id:
+        return authenticate_device(x_device_id=x_device_id, authorization=authorization, db=db)
+    authenticate_admin(authorization=authorization, x_admin_token=x_admin_token, token=None)
+    return None
