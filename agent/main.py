@@ -146,7 +146,8 @@ class AgentDaemon:
         self.streamer = LiveStreamer(
             capture=self.capture,
             compressor=self.compressor,
-            send_ws_fn=self.client.send_ws_message
+            send_ws_fn=self.client.send_ws_message,
+            device_id_fn=lambda: config.device_id,
         )
 
         # Wire streaming callbacks
@@ -213,7 +214,7 @@ class AgentDaemon:
             self.running = False
             self.client.running = False
             self.dlp_collector.stop()
-            self.streamer.stop()
+            await self.streamer.stop()
             ws_task.cancel()
             dlp_task.cancel()
             self.capture.close()

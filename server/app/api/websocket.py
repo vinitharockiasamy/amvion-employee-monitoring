@@ -1,5 +1,6 @@
 import json
 import asyncio
+import uuid
 from datetime import datetime
 from typing import Dict, Set, Optional
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query, status
@@ -19,6 +20,8 @@ class ConnectionManager:
         self.active_dlp_admins: Set[WebSocket] = set()
         # device_id -> set of dashboard WebSockets currently watching this device
         self.stream_viewers: Dict[str, Set[WebSocket]] = {}
+        # device_id -> currently valid stream session ID
+        self.active_streams: Dict[str, str] = {}
 
     async def connect_agent(self, device_id: str, websocket: WebSocket):
         await websocket.accept()
@@ -52,6 +55,7 @@ class ConnectionManager:
                 except Exception:
                     pass
             self.stream_viewers.pop(device_id, None)
+        self.active_streams.pop(device_id, None)
 
     async def connect_dashboard(self, websocket: WebSocket):
         await websocket.accept()
@@ -100,42 +104,69 @@ class ConnectionManager:
 
     async def send_to_agent(self, device_id: str, message: dict):
         ws = self.active_agents.get(device_id)
-        if ws:
-            try:
-                await ws.send_json(message)
-                return True
-            except Exception:
-                return False
-        # Fallback: if agent re-enrolled after container restart and its WS holds its prior device_id, send to active sockets
-        sent_any = False
-        for aid, active_ws in list(self.active_agents.items()):
-            try:
-                await active_ws.send_json(message)
-                sent_any = True
-            except Exception:
-                pass
-        return sent_any
+        if not ws:
+            return False
+        try:
+            await ws.send_json(message)
+            return True
+        except Exception:
+            return False
 
     async def start_device_stream(self, device_id: str, dashboard_ws: WebSocket):
-        if device_id not in self.stream_viewers:
-            self.stream_viewers[device_id] = set()
-        self.stream_viewers[device_id].add(dashboard_ws)
+        viewers = self.stream_viewers.setdefault(device_id, set())
+        if dashboard_ws in viewers:
+            return True
+        is_new_session = not viewers or device_id not in self.active_streams
+        viewers.add(dashboard_ws)
+
+        if is_new_session:
+            stream_id = str(uuid.uuid4())
+            self.active_streams[device_id] = stream_id
+            sent = await self.send_to_agent(device_id, {
+                "type": "START_STREAM",
+                "device_id": device_id,
+                "stream_id": stream_id,
+                "target_fps": 15
+            })
+            if not sent:
+                viewers.discard(dashboard_ws)
+                if not viewers:
+                    self.stream_viewers.pop(device_id, None)
+                self.active_streams.pop(device_id, None)
+                await self.set_device_status(device_id, "offline", "screenshot")
+                return False
 
         await self.set_device_status(device_id, "online", "streaming")
-        await self.send_to_agent(device_id, {
-            "type": "START_STREAM",
-            "device_id": device_id,
-            "target_fps": 15
-        })
+        return True
 
     async def stop_device_stream(self, device_id: str):
-        if device_id in self.stream_viewers:
-            self.stream_viewers.pop(device_id, None)
-        await self.set_device_status(device_id, "online", "screenshot")
-        await self.send_to_agent(device_id, {
+        self.stream_viewers.pop(device_id, None)
+        stream_id = self.active_streams.pop(device_id, None)
+        status_val = "online" if device_id in self.active_agents else "offline"
+        await self.set_device_status(device_id, status_val, "screenshot")
+        if not stream_id:
+            return True
+        return await self.send_to_agent(device_id, {
             "type": "STOP_STREAM",
-            "device_id": device_id
+            "device_id": device_id,
+            "stream_id": stream_id
         })
+
+    async def relay_live_frame(self, device_id: str, message: dict):
+        """Relay only frames for the active session on the sending agent connection."""
+        stream_id = self.active_streams.get(device_id)
+        if not stream_id or message.get("stream_id") != stream_id:
+            return False
+        if device_id not in self.stream_viewers:
+            return False
+        await self.relay_to_viewers(device_id, {
+            "type": "LIVE_FRAME",
+            "device_id": device_id,
+            "stream_id": stream_id,
+            "frame": message.get("frame"),
+            "timestamp": message.get("timestamp")
+        })
+        return True
 
     async def relay_to_viewers(self, device_id: str, message: dict):
         viewers = self.stream_viewers.get(device_id, set())
@@ -179,15 +210,8 @@ async def agent_websocket_endpoint(websocket: WebSocket, device_id: str):
                 # WebRTC signaling relay to dashboard viewers
                 await manager.relay_to_viewers(device_id, message)
             elif msg_type == "LIVE_FRAME":
-                # Fast video frame relay (base64/binary JPEG) for live stream player
-                target_ids = [device_id] if device_id in manager.stream_viewers else list(manager.stream_viewers.keys())
-                for tid in target_ids:
-                    await manager.relay_to_viewers(tid, {
-                        "type": "LIVE_FRAME",
-                        "device_id": tid,
-                        "frame": message.get("frame"),
-                        "timestamp": message.get("timestamp")
-                    })
+                # The path-bound agent device_id is authoritative; ignore payload device_id.
+                await manager.relay_live_frame(device_id, message)
     except WebSocketDisconnect:
         await manager.disconnect_agent(device_id)
     except Exception as e:
@@ -216,13 +240,25 @@ async def dashboard_websocket_endpoint(
             device_id = message.get("device_id")
 
             if msg_type == "REQUEST_STREAM" and device_id:
-                await manager.start_device_stream(device_id, websocket)
+                started = await manager.start_device_stream(device_id, websocket)
+                if not started:
+                    await websocket.send_json({
+                        "type": "STREAM_ERROR",
+                        "device_id": device_id,
+                        "detail": "Requested device is unavailable"
+                    })
             elif msg_type == "STOP_STREAM" and device_id:
                 # Remove this dashboard from viewers
                 viewers = manager.stream_viewers.get(device_id, set())
                 viewers.discard(websocket)
                 if len(viewers) == 0:
-                    await manager.stop_device_stream(device_id)
+                    stopped = await manager.stop_device_stream(device_id)
+                    if not stopped:
+                        await websocket.send_json({
+                            "type": "STREAM_ERROR",
+                            "device_id": device_id,
+                            "detail": "Requested device is unavailable"
+                        })
             elif msg_type in ("SIGNAL_OFFER", "SIGNAL_ANSWER", "SIGNAL_ICE") and device_id:
                 # WebRTC signaling relay to agent
                 await manager.send_to_agent(device_id, message)

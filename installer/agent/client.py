@@ -111,13 +111,18 @@ class AgentNetworkClient:
                             try:
                                 data = json.loads(msg)
                                 cmd_type = data.get("type")
+                                command_device_id = data.get("device_id")
+                                if command_device_id and command_device_id != config.device_id:
+                                    print(f"[Client] Ignoring {cmd_type} command for another device.")
+                                    continue
                                 if cmd_type == "START_STREAM":
                                     fps = data.get("target_fps", 15)
+                                    stream_id = data.get("stream_id")
                                     if self.on_start_stream_cb:
-                                        self.on_start_stream_cb(fps)
+                                        await self.on_start_stream_cb(stream_id, fps)
                                 elif cmd_type == "STOP_STREAM":
                                     if self.on_stop_stream_cb:
-                                        self.on_stop_stream_cb()
+                                        await self.on_stop_stream_cb(data.get("stream_id"))
                             except Exception as err:
                                 print(f"[Client] WS command handling error: {err}")
                     finally:
