@@ -15,13 +15,13 @@ from server.app.core.security import (
     verify_admin_token_value,
 )
 from server.app.db.session import IS_SQLITE, init_db, SessionLocal
-from server.app.db.models import Device, DlpEvent, DlpFileBlob
-from server.app.api import auth, agent, admin, websocket, dlp
+from server.app.db.models import Device
+from server.app.api import auth, agent, admin, websocket
 
 app = FastAPI(
     title=settings.PROJECT_NAME,
-    description="Enterprise Employee Productivity & DLP Monitoring Console",
-    version="1.2.1",
+    description="Employee Live Monitoring Console",
+    version="1.2.2",
 )
 
 app.add_middleware(
@@ -50,39 +50,14 @@ templates = Jinja2Templates(directory=settings.BASE_DIR / "templates")
 app.include_router(auth.router, prefix=settings.API_V1_STR)
 app.include_router(agent.router, prefix=settings.API_V1_STR)
 app.include_router(admin.router, prefix=settings.API_V1_STR)
-app.include_router(dlp.router)
 app.include_router(websocket.router)
-
-
-def _prune_expired_dlp_records():
-    """Prune DLP audit events older than DLP_RETENTION_DAYS and any unreferenced vault blobs."""
-    cutoff = datetime.utcnow() - timedelta(days=settings.DLP_RETENTION_DAYS)
-    with SessionLocal() as db:
-        deleted_events = db.query(DlpEvent).filter(DlpEvent.timestamp < cutoff).delete(synchronize_session=False)
-        if deleted_events:
-            orphan_blobs = (
-                db.query(DlpFileBlob)
-                .outerjoin(DlpEvent, DlpFileBlob.id == DlpEvent.file_blob_id)
-                .filter(DlpEvent.id.is_(None), DlpFileBlob.created_at < cutoff)
-                .all()
-            )
-            for blob in orphan_blobs:
-                if blob.storage_path and os.path.exists(blob.storage_path):
-                    try:
-                        os.remove(blob.storage_path)
-                    except OSError:
-                        pass
-                db.delete(blob)
-            db.commit()
 
 
 async def presence_watchdog():
     """Periodically check for timed-out agents and run scheduled storage maintenance."""
-    ticks = 0
     while True:
         try:
             await asyncio.sleep(10)
-            ticks += 1
             threshold = datetime.utcnow() - timedelta(seconds=20)
             stale_ids = []
             with SessionLocal() as db:
@@ -98,9 +73,6 @@ async def presence_watchdog():
             for sid in stale_ids:
                 await websocket.manager.disconnect_agent(sid)
 
-            # Run DLP retention check once per hour (360 * 10s)
-            if ticks % 360 == 0:
-                await asyncio.to_thread(_prune_expired_dlp_records)
         except asyncio.CancelledError:
             break
         except Exception as e:

@@ -196,22 +196,3 @@ def verify_admin_ws_request(websocket: WebSocket, query_token: Optional[str] = N
         candidates.append(c_tok.strip())
 
     return any(verify_admin_token_value(c) for c in candidates)
-
-
-def authenticate_device_or_admin(
-    x_device_id: Optional[str] = Header(None, alias="X-Device-Id"),
-    authorization: Optional[str] = Header(None, alias="Authorization"),
-    x_admin_token: Optional[str] = Header(None, alias="X-Admin-Token"),
-    session_cookie: Optional[str] = Cookie(None, alias=ADMIN_SESSION_COOKIE),
-    db: Session = Depends(get_db),
-) -> Optional[Device]:
-    """Allow enrolled endpoints (X-Device-Id + Bearer secret) or authenticated admins to ingest DLP records."""
-    if isinstance(x_device_id, str) and x_device_id:
-        return authenticate_device(x_device_id=x_device_id, authorization=authorization, db=db)
-    authenticate_admin(
-        authorization=authorization,
-        x_admin_token=x_admin_token,
-        token=None,
-        session_cookie=session_cookie if isinstance(session_cookie, str) else None,
-    )
-    return None

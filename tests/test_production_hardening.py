@@ -33,11 +33,8 @@ class TestProductionHardening(unittest.TestCase):
         cls.temp_dir = tempfile.TemporaryDirectory()
         temp_root = Path(cls.temp_dir.name)
         cls.shots_dir = temp_root / "screenshots"
-        cls.vault_dir = temp_root / "dlp_vault"
         cls.shots_dir.mkdir(parents=True, exist_ok=True)
-        cls.vault_dir.mkdir(parents=True, exist_ok=True)
         settings.SCREENSHOTS_DIR = cls.shots_dir
-        settings.DLP_VAULT_DIR = cls.vault_dir
 
         db_file = temp_root / "test_prod.db"
         cls.engine = create_engine(

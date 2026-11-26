@@ -45,46 +45,6 @@ def _is_valid_active_url(u: str) -> bool:
         return False
     return True
 
-def _default_dlp_settings() -> dict:
-    env_enabled = os.getenv("DLP_EVIDENCE_ENABLED", "").strip().lower()
-    evidence_enabled = False if env_enabled in ("0", "false", "no", "off") else True
-    try:
-        max_mb = float(os.getenv("DLP_MAX_EVIDENCE_SIZE_MB", "25"))
-    except ValueError:
-        max_mb = 25.0
-    max_mb_val = int(max_mb) if max_mb.is_integer() else max_mb
-
-    return {
-        "enabled": True,
-        "monitored_directories": [
-            "Desktop",
-            "Documents",
-            "Downloads",
-            "Pictures",
-            "Music",
-            "Videos"
-        ],
-        "monitor_removable_storage": True,
-        "evidence_enabled": evidence_enabled,
-        "maximum_evidence_size_mb": max_mb_val,
-        "baseline_hash_max_mb": 100,
-        "recycle_bin_recovery_enabled": True,
-        "secondary_backup_directories": [],
-        "debug_diagnostics": False,
-        "evidence_events": [
-            "CREATED",
-            "MODIFIED",
-            "MOVED",
-            "RENAMED",
-            "COPIED",
-            "USB_TRANSFER",
-            "DELETED"
-        ],
-        "poll_interval_sec": 2.0,
-        "max_queue_size": 500
-    }
-
-
 class AgentConfig:
     def __init__(self):
         self.server_url = os.getenv("SERVER_URL", DEFAULT_PUBLIC_URL)
@@ -92,40 +52,11 @@ class AgentConfig:
         self.screenshot_interval_sec = 3
         self.compression_quality = 70
         self.thumbnail_width = 1280
-        self.dlp = _default_dlp_settings()
         
         self.device_id = None
         self.device_secret = None
         
         self.load_state()
-
-    def resolve_monitored_directories(self) -> list:
-        """Resolve configured directory names (relative to user profile, OneDrive folders, or absolute paths)."""
-        home = Path.home()
-        resolved = []
-        seen = set()
-
-        def _add_candidate(cand_path: Path, require_existing: bool = False):
-            if require_existing and not cand_path.is_dir():
-                return
-            norm = str(cand_path.resolve()) if cand_path.exists() else str(cand_path)
-            key = norm.lower()
-            if key not in seen:
-                seen.add(key)
-                resolved.append(Path(norm))
-
-        for entry in self.dlp.get("monitored_directories", []):
-            if not entry:
-                continue
-            p = Path(entry)
-            if p.is_absolute():
-                _add_candidate(p, require_existing=False)
-            else:
-                _add_candidate(home / p, require_existing=False)
-                # Also monitor OneDrive-redirected counterparts (e.g. OneDrive\Desktop, OneDrive\Documents) if present
-                onedrive_cand = home / "OneDrive" / p
-                _add_candidate(onedrive_cand, require_existing=True)
-        return resolved
 
     def discover_cloud_url(self) -> bool:
         """Automatically discover the active Render Cloud URL if the service subdomain was renamed."""
@@ -164,19 +95,6 @@ class AgentConfig:
                     self.device_id = data.get("device_id")
                     self.device_secret = data.get("device_secret")
                     self.screenshot_interval_sec = 3
-                    if isinstance(data.get("dlp"), dict):
-                        merged = _default_dlp_settings()
-                        merged.update(data["dlp"])
-                        if merged.get("monitored_directories") == ["Desktop", "Documents", "Downloads", "Pictures"]:
-                            merged["monitored_directories"] = [
-                                "Desktop",
-                                "Documents",
-                                "Downloads",
-                                "Pictures",
-                                "Music",
-                                "Videos",
-                            ]
-                        self.dlp = merged
             except Exception as e:
                 print(f"[Config] Error loading state: {e}")
 
@@ -210,8 +128,7 @@ class AgentConfig:
                 "device_id": self.device_id,
                 "device_secret": self.device_secret,
                 "screenshot_interval_sec": self.screenshot_interval_sec,
-                "compression_quality": self.compression_quality,
-                "dlp": self.dlp
+                "compression_quality": self.compression_quality
             }
             with open(CONFIG_FILE, "w") as f:
                 json.dump(data, f, indent=2)

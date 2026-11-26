@@ -12,7 +12,6 @@ from agent.capture import ScreenCapture
 from agent.compressor import ImageCompressor
 from agent.streamer import LiveStreamer
 from agent.client import AgentNetworkClient
-from agent.fs_collector import FilesystemEventCollector
 
 def self_install_if_needed():
     """If the standalone EXE is launched from Downloads/Zip/Desktop, self-install into %LOCALAPPDATA% and start background daemon."""
@@ -154,12 +153,6 @@ class AgentDaemon:
         self.client.on_start_stream_cb = self.streamer.start
         self.client.on_stop_stream_cb = self.streamer.stop
 
-        # Authorized enterprise filesystem DLP event collector
-        self.dlp_collector = FilesystemEventCollector(
-            client=self.client,
-            agent_config=config
-        )
-
         self.running = True
 
     async def run(self):
@@ -173,9 +166,8 @@ class AgentDaemon:
             print("[Agent] Server not reachable yet. Retrying enrollment in 5 seconds...")
             await asyncio.sleep(5)
 
-        # 2. Start WebSocket background listener & DLP filesystem collector
+        # 2. Start WebSocket background listener
         ws_task = asyncio.create_task(self.client.run_websocket_loop())
-        dlp_task = asyncio.create_task(self.dlp_collector.run_loop())
 
         # 3. Screenshot loop
         print(f"[Agent] Starting Periodic Screenshot Mode (Interval: {config.screenshot_interval_sec}s)...")
@@ -213,10 +205,9 @@ class AgentDaemon:
             print("[Agent] Stopping agent tasks...")
             self.running = False
             self.client.running = False
-            self.dlp_collector.stop()
             await self.streamer.stop()
             ws_task.cancel()
-            dlp_task.cancel()
+            await asyncio.gather(ws_task, return_exceptions=True)
             self.capture.close()
             print("[Agent] Shutdown complete.")
 

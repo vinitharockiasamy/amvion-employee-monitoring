@@ -12,9 +12,7 @@ services:
         value: enterprise-secret-key-2026
       - key: MAX_SCREENSHOTS_PER_DEVICE
         value: 30
-      - key: DLP_RETENTION_DAYS
-        value: 90
       # Optional Render Production Upgrades (set in Render Dashboard Environment tab):
       # - DATABASE_URL: attach Render PostgreSQL for permanent database persistence
-      # - STORAGE_DIR: set to /var/data when attaching a Render Persistent Disk for vault & screenshot persistence
+      # - STORAGE_DIR: set to /var/data when attaching a Render Persistent Disk for screenshot persistence
       # - ADMIN_USERNAME / ADMIN_PASSWORD / ADMIN_AUTH_TOKEN: override default admin credentials

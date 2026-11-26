@@ -1,4 +1,4 @@
-# Employee Monitoring System — Live Screen Wall & Standalone Windows Agent
+# Windows Employee Live Monitoring — Live Screen Wall & Standalone Agent
 
 An enterprise-grade desktop screen monitoring and situational awareness platform built with **FastAPI**, **WebSockets**, **SQLite**, and a **Signed Windows Installer (`.msi`) Agent**.
 
